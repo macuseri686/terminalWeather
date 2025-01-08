@@ -28,6 +28,10 @@ from dialogs.settings_dialog import SettingsDialog
 from icon_handler import WeatherIcons, LargeWeatherIcons
 from radar import RadarDisplay, RadarContainer
 from geo_handler import GeoHandler
+import locale
+
+# Set locale to user's default to support UTF-8
+locale.setlocale(locale.LC_ALL, '')
 
 # Load environment variables from .env file
 load_dotenv()
@@ -169,6 +173,10 @@ class WeatherApp:
             ('map_road_primary', 'light gray', 'dark gray'),  # Primary roads
             ('map_road_secondary', 'dark gray', 'dark gray'), # Secondary roads
             ('map_road_tertiary', 'dark gray', 'dark gray'),  # Tertiary roads
+            ('map_road', 'dark gray', 'light gray'),  # Default road style
+            ('map_ocean', 'light blue', 'dark blue'),  # Ocean areas
+            ('map_urban', 'dark gray', 'default'),  # Add this for urban areas
+            ('map_nature', 'dark green', 'default'),  # Add this for parks/forests
         ]
 
     def _create_current_conditions(self) -> urwid.Widget:
@@ -659,6 +667,15 @@ class WeatherApp:
         
         # Calculate dialog size
         screen = urwid.raw_display.Screen()
+        
+        # Enable UTF-8 and 256 colors support
+        screen.set_terminal_properties(colors=256)
+        
+        # Set encoding for screen output
+        import sys
+        if hasattr(sys.stdout, 'encoding'):
+            sys.stdout.reconfigure(encoding='utf-8')  # Python 3.7+
+        
         screen_cols, screen_rows = screen.get_cols_rows()
         dialog_width = int(screen_cols * 0.3)
         dialog_height = int(screen_rows * 0.2)
@@ -671,8 +688,13 @@ class WeatherApp:
             'middle', dialog_height
         )
         
-        # Use loading overlay as initial widget
-        self.loop = urwid.MainLoop(self.loading_overlay, self.palette)
+        # Use loading overlay as initial widget with UTF-8 support
+        self.loop = urwid.MainLoop(
+            self.loading_overlay, 
+            self.palette,
+            screen=screen,  # Use our configured screen
+            handle_mouse=True  # Keep mouse support but remove keyboard handling
+        )
         
         # Start the loading animation
         progress.start_animation(self.loop)

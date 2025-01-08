@@ -9,9 +9,31 @@ from math import floor
 import json
 import os
 from datetime import datetime, timedelta
+import sys
 
 class RadarDisplay(urwid.Widget):
     _sizing = frozenset(['box'])
+    
+    INTENSITY_CHARS = {
+        'none': ' ',
+        'very_light': '░',
+        'light': '▒',
+        'moderate': '▓',
+        'heavy': '█',
+        'extreme': '█'
+    }
+    
+    MAP_CHARS = {
+        'road': '═',
+        'road_vertical': '║',
+        'city': '○',
+        'location': '◎',
+        'water': '≈',
+        'corner_tl': '╔',
+        'corner_tr': '╗',
+        'corner_bl': '╚',
+        'corner_br': '╝'
+    }
     
     def __init__(self, width, height):
         super().__init__()
@@ -40,7 +62,7 @@ class RadarDisplay(urwid.Widget):
         age = datetime.now() - mtime
         return age < timedelta(hours=max_age_hours)
 
-    def _fetch_overpass_data(self, lat: float, lon: float, radius: float = 10000) -> Optional[Dict]:
+    def _fetch_overpass_data(self, lat: float, lon: float, radius: float = 5000) -> Optional[Dict]:
         """Fetch map data from Overpass API with caching"""
         cache_path = self._get_cache_path(lat, lon, radius)
         
@@ -61,9 +83,47 @@ class RadarDisplay(urwid.Widget):
                 (
                   way["highway"~"^(motorway|trunk|primary|secondary|tertiary)$"]
                     (around:{radius},{lat},{lon});
+                  way["natural"="water"]["water"="bay"]
+                    (around:{radius},{lat},{lon});
+                  relation["natural"="water"]["water"="bay"]
+                    (around:{radius},{lat},{lon});
+                  way["place"="sea"]
+                    (around:{radius},{lat},{lon});
+                  relation["place"="sea"]
+                    (around:{radius},{lat},{lon});
+                  way["water"="strait"]
+                    (around:{radius},{lat},{lon});
+                  relation["water"="strait"]
+                    (around:{radius},{lat},{lon});
                   way["natural"="water"]
                     (around:{radius},{lat},{lon});
+                  relation["natural"="water"]
+                    (around:{radius},{lat},{lon});
+                  relation["water"="lake"]
+                    (around:{radius},{lat},{lon});
+                  relation["water"="reservoir"]
+                    (around:{radius},{lat},{lon});
                   way["waterway"="river"]
+                    (around:{radius},{lat},{lon});
+                  way["natural"="coastline"]
+                    (around:{radius},{lat},{lon});
+                  relation["place"="ocean"]
+                    (around:{radius},{lat},{lon});
+                  relation["place"="sea"]
+                    (around:{radius},{lat},{lon});
+                  way["place"="island"]
+                    (around:{radius},{lat},{lon});
+                  relation["place"="island"]
+                    (around:{radius},{lat},{lon});
+                  way["natural"="land"]
+                    (around:{radius},{lat},{lon});
+                  relation["natural"="land"]
+                    (around:{radius},{lat},{lon});
+                  way["landuse"~"^(residential|commercial|industrial)$"]
+                    (around:{radius},{lat},{lon});
+                  way["leisure"~"^(park|garden|nature_reserve)$"]
+                    (around:{radius},{lat},{lon});
+                  way["natural"~"^(wood|forest)$"]
                     (around:{radius},{lat},{lon});
                   node["place"~"^(city|town)$"]
                     (around:{radius},{lat},{lon});
@@ -107,96 +167,178 @@ class RadarDisplay(urwid.Widget):
                                  tile_bounds: tuple = None) -> tuple:
         """Process Overpass API data and create ASCII map and style map"""
         logging.debug(f"Processing features for map size: {width}x{height}")
+        
+        # Debug the data we received
+        water_features = [e for e in data['elements'] if e['type'] in ['way', 'relation'] 
+                         and 'tags' in e and ('natural' in e['tags'] or 'water' in e['tags'] 
+                         or 'place' in e['tags'])]
+        logging.debug(f"Found water features: {[f['tags'].get('name', 'unnamed') + ': ' + str(f['tags']) for f in water_features]}")
+        
         char_map = np.full((height, width), ' ', dtype='U1')
         style_map = np.full((height, width), 'map_background', dtype=object)
-        
+
         if not data or 'elements' not in data:
             logging.warning("No elements found in Overpass data")
             return char_map, style_map
 
-        # Initialize counters
+        # Initialize counters and lookups
         ways_count = {'highway': 0, 'water': 0, 'waterway': 0}
         places_count = 0
-
-        # First, build a nodes lookup dictionary
         nodes = {}
+        ways = {}
         node_count = 0
-        places = []  # Store places for later
+        places = []
         
+        # Build node and way lookups
         for element in data['elements']:
             if element['type'] == 'node':
                 nodes[element['id']] = (element['lat'], element['lon'])
                 node_count += 1
-                # Store places for later processing
                 if 'tags' in element and element['tags'].get('place') in ['city', 'town']:
                     places.append(element)
-        
-        logging.debug(f"Processed {node_count} nodes")
+            elif element['type'] == 'way':
+                ways[element['id']] = element
 
-        # First pass: Draw water bodies (to be in background)
+        # First pass: Process water bodies
+        water_bodies = 0
+        for element in data['elements']:
+            if element['type'] in ['way', 'relation'] and 'tags' in element:
+                tags = element['tags']
+                
+                # Expanded water body detection
+                is_water_body = False
+                
+                # Check for marine features first
+                if (tags.get('place') in ['sea', 'ocean', 'bay', 'strait', 'sound'] or
+                    tags.get('natural') == 'strait' or
+                    tags.get('marine') == 'yes'):
+                    is_water_body = True
+                    logging.debug(f"Found marine feature: {tags}")
+                
+                # Then check for inland water bodies
+                elif ((tags.get('natural') == 'water' and tags.get('water', '') != 'river') or
+                      tags.get('water') in ['lake', 'reservoir', 'basin', 'bay']):
+                    is_water_body = True
+                    logging.debug(f"Found inland water: {tags}")
+                
+                # Finally check multipolygons
+                elif (tags.get('type') == 'multipolygon' and
+                      (tags.get('place') in ['sea', 'ocean', 'bay', 'strait', 'sound'] or
+                       tags.get('natural') in ['water', 'strait'] or
+                       tags.get('water') in ['lake', 'bay'])):
+                    is_water_body = True
+                    logging.debug(f"Found multipolygon water: {tags}")
+
+                if is_water_body:
+                    name = tags.get('name', 'unnamed')
+                    logging.debug(f"Processing water body: {name} ({tags})")
+                    
+                    coords = self._get_element_coords(element, nodes, ways)
+                    if coords:
+                        coords_2d = self._project_coords_list(coords, center_lat, center_lon, width, height)
+                        if len(coords_2d) >= 3:
+                            # Create a closed polygon for the water body
+                            polygon = coords_2d + [coords_2d[0]]  # Close the polygon
+                            
+                            # Draw the boundary
+                            for i in range(len(polygon) - 1):
+                                x1, y1 = polygon[i]
+                                x2, y2 = polygon[i + 1]
+                                self._draw_line_segment(char_map, style_map, x1, y1, x2, y2, '~', 'map_water')
+                            
+                            # Fill the water body using point-in-polygon test
+                            min_x = max(0, int(min(p[0] for p in coords_2d)))
+                            max_x = min(width, int(max(p[0] for p in coords_2d)) + 1)
+                            min_y = max(0, int(min(p[1] for p in coords_2d)))
+                            max_y = min(height, int(max(p[1] for p in coords_2d)) + 1)
+                            
+                            fill_count = 0
+                            for y in range(min_y, max_y):
+                                if y < 0 or y >= height:
+                                    continue
+                                for x in range(min_x, max_x):
+                                    if x < 0 or x >= width:
+                                        continue
+                                    if self._point_in_polygon(x, y, coords_2d):
+                                        char_map[y, x] = '~'
+                                        style_map[y, x] = 'map_water_fill'
+                                        fill_count += 1
+                            
+                            logging.debug(f"Filled {fill_count} pixels for {name}")
+
+        # Second pass: Draw rivers as lines only, no filling
+        for element in data['elements']:
+            if element['type'] == 'way' and 'tags' in element:
+                tags = element['tags']
+                if tags.get('waterway') == 'river' or (tags.get('natural') == 'water' and tags.get('water') == 'river'):
+                    coords = [nodes[ref] for ref in element['nodes'] if ref in nodes]
+                    if coords:
+                        # Draw river as a line feature
+                        self._draw_line_feature(char_map, style_map, coords, '~', 'map_water',
+                                              center_lat, center_lon, width, height,
+                                              fill=False)  # Explicitly set fill=False for rivers
+
+        # Third pass: Draw urban and natural areas
+        for element in data['elements']:
+            if element['type'] in ['way', 'relation'] and 'tags' in element:
+                style = None
+                char = ' '
+                
+                # Determine style based on tags
+                if element['tags'].get('landuse') in ['residential', 'commercial', 'industrial']:
+                    style = 'map_urban'
+                    char = 'U'  # Changed from '░' to '█' for urban areas
+                elif (element['tags'].get('leisure') in ['park', 'garden', 'nature_reserve'] or
+                      element['tags'].get('natural') in ['wood', 'forest']):
+                    style = 'map_nature'
+                    char = 'F'  # Changed from '♠' to '↟' for natural areas
+                
+                if style:
+                    coords = self._get_element_coords(element, nodes, ways)
+                    if coords:
+                        coords_2d = self._project_coords_list(coords, center_lat, center_lon, width, height)
+                        if len(coords_2d) >= 3:
+                            # Fill the area
+                            for y in range(height):
+                                for x in range(width):
+                                    if self._point_in_polygon(x, y, coords_2d):
+                                        char_map[y, x] = char
+                                        style_map[y, x] = style
+
+        # Fourth pass: Draw roads and waterways on top
         for element in data['elements']:
             if element['type'] == 'way' and 'tags' in element:
                 coords = [nodes[ref] for ref in element['nodes'] if ref in nodes]
-                if not coords:
-                    continue
-
-                if element['tags'].get('natural') == 'water':
-                    char = '~'
-                    style = 'map_water_fill'
-                    ways_count['water'] += 1
-                    self._draw_line_feature(char_map, style_map, coords, char, style, 
-                                         center_lat, center_lon, width, height,
-                                         fill=True)  # Fill water bodies
-
-        # Define road characters for different types
-        road_chars = {
-            'motorway': '#',     # Hash for highways
-            'trunk': '=',        # Double equals for major roads
-            'primary': '-',      # Single dash for primary roads
-            'secondary': '.',    # Dots for secondary roads
-            'tertiary': ',',     # Comma for tertiary roads
-        }
-
-        # Update the road style assignment in the loop:
-        road_styles = {
-            'motorway': 'map_road_highway',
-            'trunk': 'map_road_major',
-            'primary': 'map_road_primary',
-            'secondary': 'map_road_secondary',
-            'tertiary': 'map_road_tertiary',
-        }
-
-        # Second pass: Draw roads and rivers
-        for element in data['elements']:
-            if element['type'] == 'way':
-                coords = [nodes[ref] for ref in element['nodes'] if ref in nodes]
-                if not coords:
-                    continue
-
-                char = ' '
-                style = 'map_background'
-                if 'tags' in element:
-                    highway_type = element.get('tags', {}).get('highway')
-                    if highway_type in road_chars:
-                        char = road_chars[highway_type]
-                        style = road_styles[highway_type]
-                        ways_count['highway'] += 1
-                    elif element['tags'].get('waterway') == 'river':
+                if coords:
+                    char = None
+                    style = None
+                    
+                    if element['tags'].get('waterway') in ['river', 'stream', 'canal']:
                         char = '~'
                         style = 'map_water'
                         ways_count['waterway'] += 1
-                    elif element['tags'].get('natural') == 'water':
-                        continue  # Skip water bodies in second pass
-
-                self._draw_line_feature(char_map, style_map, coords, char, style,
-                                      center_lat, center_lon, width, height)
+                    elif element['tags'].get('highway'):
+                        highway_type = element['tags']['highway']
+                        char = {
+                            'motorway': '#',
+                            'trunk': '=',
+                            'primary': '-',
+                            'secondary': '.',
+                            'tertiary': ','
+                        }.get(highway_type, '·')
+                        style = 'map_road'
+                        ways_count['highway'] += 1
+                    
+                    if char and style:
+                        self._draw_line_feature(char_map, style_map, coords, char, style,
+                                              center_lat, center_lon, width, height)
 
         # Finally, draw place labels on top of everything
         for element in places:
             name = element['tags'].get('name', '')
             if name:
                 places_count += 1
-                x, y = self._project_coords(
+                projected = self._project_coords(
                     element['lat'], 
                     element['lon'], 
                     center_lat, 
@@ -207,23 +349,26 @@ class RadarDisplay(urwid.Widget):
                     degrees_per_pixel_lon,
                     tile_bounds
                 )
-                logging.debug(f"Processing place label '{name}' at coordinates ({x}, {y})")
-                logging.debug(f"Map dimensions: {char_map.shape}")
                 
-                # Draw text centered at coordinates
-                text_start_x = max(0, x - len(name)//2)
-                text_end_x = min(width, text_start_x + len(name))
-                logging.debug(f"Label span: {text_start_x} to {text_end_x} at y={y}")
-                
-                for i, char in enumerate(name):
-                    pos_x = text_start_x + i
-                    if pos_x < width:
-                        try:
-                            char_map[y, pos_x] = char
-                            style_map[y, pos_x] = 'map_label'
-                            logging.debug(f"Placed character '{char}' at ({pos_x}, {y})")
-                        except IndexError:
-                            logging.error(f"Failed to place character at ({pos_x}, {y}). Array shape: {char_map.shape}")
+                if projected is not None:  # Only process if projection is valid
+                    x, y = projected
+                    logging.debug(f"Processing place label '{name}' at coordinates ({x}, {y})")
+                    logging.debug(f"Map dimensions: {char_map.shape}")
+                    
+                    # Draw text centered at coordinates
+                    text_start_x = max(0, x - len(name)//2)
+                    text_end_x = min(width, text_start_x + len(name))
+                    logging.debug(f"Label span: {text_start_x} to {text_end_x} at y={y}")
+                    
+                    for i, char in enumerate(name):
+                        pos_x = text_start_x + i
+                        if 0 <= pos_x < width and 0 <= y < height:
+                            try:
+                                char_map[y, pos_x] = char
+                                style_map[y, pos_x] = 'map_label'
+                                logging.debug(f"Placed character '{char}' at ({pos_x}, {y})")
+                            except IndexError:
+                                logging.error(f"Failed to place character at ({pos_x}, {y}). Array shape: {char_map.shape}")
 
         # After processing
         label_count = np.sum(style_map == 'map_label')
@@ -244,55 +389,136 @@ class RadarDisplay(urwid.Widget):
         points = []
         # Convert all coordinates to pixel positions
         for coord in coords:
-            x, y = self._project_coords(coord[0], coord[1], center_lat, center_lon, width, height)
-            points.append((x, y))
+            projected = self._project_coords(coord[0], coord[1], center_lat, center_lon, width, height)
+            if projected is not None:
+                points.append(projected)
         
-        if style == 'map_city_area':
-            logging.debug(f"Drawing city boundary with {len(points)} points")
-            # Draw boundary first
-            for i in range(len(points)):
-                x1, y1 = points[i]
-                x2, y2 = points[(i + 1) % len(points)]  # Connect back to start
-                self._draw_line_segment(char_map, style_map, x1, y1, x2, y2, char, style)
+        if not points:
+            return
+        
+        # Draw the boundary lines
+        for i in range(len(points) - 1):
+            x1, y1 = points[i]
+            x2, y2 = points[i + 1]
+            self._draw_line_segment(char_map, style_map, x1, y1, x2, y2, char, style)
+        
+        # Close the polygon if it's a fill feature
+        if fill and len(points) > 2:
+            x1, y1 = points[-1]
+            x2, y2 = points[0]
+            self._draw_line_segment(char_map, style_map, x1, y1, x2, y2, char, style)
             
-            if fill:
-                # Find center point for flood fill
-                center_x = sum(p[0] for p in points) // len(points)
-                center_y = sum(p[1] for p in points) // len(points)
-                self._flood_fill_from_point(char_map, style_map, center_x, center_y, style)
-        else:
-            # Draw other features normally
-            for i in range(len(points) - 1):
-                x1, y1 = points[i]
-                x2, y2 = points[i + 1]
-                self._draw_line_segment(char_map, style_map, x1, y1, x2, y2, char, style)
+            # Try multiple fill points for better coverage
+            center_x = sum(p[0] for p in points) // len(points)
+            center_y = sum(p[1] for p in points) // len(points)
+            
+            # Try center point first
+            self._flood_fill_from_point(char_map, style_map, center_x, center_y, style)
+            
+            # If center didn't work, try points along the boundary
+            if style_map[center_y, center_x] != style:
+                for i in range(0, len(points), max(1, len(points) // 8)):
+                    x, y = points[i]
+                    if 0 <= x < width and 0 <= y < height:
+                        self._flood_fill_from_point(char_map, style_map, x, y, style)
 
     def _flood_fill_from_point(self, char_map: np.ndarray, style_map: np.ndarray, 
                               start_x: int, start_y: int, style: str):
-        """Flood fill starting from a specific point"""
+        """Flood fill starting from a specific point, handling viewport boundaries"""
         height, width = char_map.shape
-        if not (0 <= start_x < width and 0 <= start_y < height):
-            return
         
-        # Use a queue for flood fill
+        # If starting point is outside viewport or invalid, try to find a valid starting point
+        if not (0 <= start_x < width and 0 <= start_y < height) or style_map[start_y, start_x] != 'map_background':
+            # Try points along the boundary of the water body
+            for y in range(height):
+                for x in range(width):
+                    # Look for points adjacent to water boundaries
+                    if style_map[y, x] == 'map_background':
+                        has_water_neighbor = False
+                        for dx, dy in [(1,0), (-1,0), (0,1), (0,-1)]:
+                            nx, ny = x + dx, y + dy
+                            if (0 <= nx < width and 0 <= ny < height and 
+                                style_map[ny, nx] == 'map_water'):
+                                has_water_neighbor = True
+                                break
+                        if has_water_neighbor:
+                            start_x, start_y = x, y
+                            break
+                if style_map[start_y, start_x] == 'map_background':
+                    break
+            else:
+                return  # No valid fill points found
+        
+        # Use a queue for breadth-first fill (more efficient for large areas)
         queue = [(start_x, start_y)]
         seen = set()
         
         while queue:
-            x, y = queue.pop(0)
-            if (x, y) in seen or not (0 <= x < width and 0 <= y < height):
+            x, y = queue.pop(0)  # Use pop(0) for BFS behavior
+            
+            if (x, y) in seen:
                 continue
             
-            if style_map[y, x] != style:  # Only fill if not already filled
-                char_map[y, x] = ' '
-                style_map[y, x] = style
-                seen.add((x, y))
-                
-                # Add adjacent points
-                for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-                    new_x, new_y = x + dx, y + dy
-                    if (new_x, new_y) not in seen:
-                        queue.append((new_x, new_y))
+            if not (0 <= x < width and 0 <= y < height):
+                continue
+            
+            # Only fill background pixels that are bounded by water
+            if style_map[y, x] != 'map_background':
+                continue
+            
+            # Check if this point is bounded by water or existing fill
+            has_water_boundary = False
+            for dx, dy in [(1,0), (-1,0), (0,1), (0,-1)]:
+                nx, ny = x + dx, y + dy
+                if not (0 <= nx < width and 0 <= ny < height):
+                    continue
+                neighbor_style = style_map[ny, nx]
+                if neighbor_style in ['map_water', 'map_water_fill']:
+                    has_water_boundary = True
+                    break
+            
+            if not has_water_boundary:
+                continue
+            
+            # Fill this point
+            char_map[y, x] = '~'
+            style_map[y, x] = style
+            seen.add((x, y))
+            
+            # Add neighboring points to queue
+            for dx, dy in [(1,0), (-1,0), (0,1), (0,-1)]:
+                nx, ny = x + dx, y + dy
+                if (nx, ny) not in seen and 0 <= nx < width and 0 <= ny < height:
+                    queue.append((nx, ny))
+
+    def _is_valid_fill_point(self, char_map: np.ndarray, style_map: np.ndarray, x: int, y: int) -> bool:
+        """Check if a point is valid for flood filling"""
+        height, width = char_map.shape
+        
+        # Basic bounds check
+        if not (0 <= x < width and 0 <= y < height):
+            return False
+        
+        # Check if point is background (fillable)
+        if style_map[y, x] != 'map_background':
+            return False
+        
+        # Check if point is bounded by water features or blocked by land
+        has_water_boundary = False
+        for dx, dy in [(1,0), (0,1), (-1,0), (0,-1)]:
+            nx, ny = x + dx, y + dy
+            if not (0 <= nx < width and 0 <= ny < height):
+                continue
+            
+            neighbor_style = style_map[ny, nx]
+            # If we hit a land boundary, this point is not valid for filling
+            if neighbor_style in ['map_land', 'map_landuse']:
+                return False
+            # Check for water boundaries
+            if neighbor_style in ['map_water', 'map_water_fill']:
+                has_water_boundary = True
+        
+        return has_water_boundary
 
     def _draw_text(self, char_map: np.ndarray, style_map: np.ndarray, x: int, y: int, text: str, style: str):
         """Draw text on the character map with a background"""
@@ -326,34 +552,81 @@ class RadarDisplay(urwid.Widget):
                     char_map[y+1, start_x:end_x] = '_' * len(text_portion)
                     style_map[y+1, start_x:end_x] = style
 
-    def _draw_line_segment(self, char_map: np.ndarray, style_map: np.ndarray, x1: int, y1: int, x2: int, y2: int, char: str, style: str):
-        """Draw a line segment using Bresenham's algorithm"""
+    def _draw_line_segment(self, char_map: np.ndarray, style_map: np.ndarray, 
+                          x1: int, y1: int, x2: int, y2: int, char: str, style: str):
+        """Draw a line segment using Bresenham's algorithm with proper clipping"""
         height, width = char_map.shape
+        
+        # Cohen-Sutherland line clipping
+        def compute_code(x, y):
+            code = 0
+            if x < 0: code |= 1        # Left
+            if x >= width: code |= 2    # Right
+            if y < 0: code |= 4        # Top
+            if y >= height: code |= 8   # Bottom
+            return code
+        
+        # Clip line to viewport
+        code1 = compute_code(x1, y1)
+        code2 = compute_code(x2, y2)
+        
+        while True:
+            if not (code1 | code2):  # Both points inside viewport
+                break
+            elif code1 & code2:  # Both points outside viewport on same side
+                return
+            else:
+                # Pick a point outside viewport
+                code = code1 if code1 else code2
+                
+                # Find intersection point
+                if code & 1:  # Left edge
+                    y = y1 + (y2 - y1) * (0 - x1) / (x2 - x1)
+                    x = 0
+                elif code & 2:  # Right edge
+                    y = y1 + (y2 - y1) * (width-1 - x1) / (x2 - x1)
+                    x = width-1
+                elif code & 4:  # Top edge
+                    x = x1 + (x2 - x1) * (0 - y1) / (y2 - y1)
+                    y = 0
+                else:  # Bottom edge
+                    x = x1 + (x2 - x1) * (height-1 - y1) / (y2 - y1)
+                    y = height-1
+                
+                # Replace point outside viewport
+                if code == code1:
+                    x1, y1 = int(x), int(y)
+                    code1 = compute_code(x1, y1)
+                else:
+                    x2, y2 = int(x), int(y)
+                    code2 = compute_code(x2, y2)
+        
+        # Now draw the clipped line
         dx = abs(x2 - x1)
         dy = abs(y2 - y1)
         steep = dy > dx
-
+        
         if steep:
             x1, y1 = y1, x1
             x2, y2 = y2, x2
-
+        
         if x1 > x2:
             x1, x2 = x2, x1
             y1, y2 = y2, y1
-
+        
         dx = x2 - x1
         dy = abs(y2 - y1)
         error = dx // 2
         y = y1
         y_step = 1 if y1 < y2 else -1
-
+        
         for x in range(x1, x2 + 1):
             if steep:
-                if 0 <= y < width and 0 <= x < height:
+                if 0 <= y < width and 0 <= x < height:  # Only draw if in bounds
                     char_map[x, y] = char
                     style_map[x, y] = style
             else:
-                if 0 <= x < width and 0 <= y < height:
+                if 0 <= x < width and 0 <= y < height:  # Only draw if in bounds
                     char_map[y, x] = char
                     style_map[y, x] = style
             error -= dy
@@ -364,30 +637,22 @@ class RadarDisplay(urwid.Widget):
     def _project_coords(self, lat: float, lon: float, center_lat: float, center_lon: float, 
                        width: int, height: int, degrees_per_pixel_lat=None, 
                        degrees_per_pixel_lon=None, tile_bounds=None) -> tuple:
-        """Project geographic coordinates to pixel coordinates relative to center"""
-        if tile_bounds:
-            lat1, lon1, lat2, lon2 = tile_bounds
-            # Adjust calculation to center the reference point
-            x = int(width/2 + ((lon - center_lon) / (lon2 - lon1)) * width)
-            y = int(height/2 + ((center_lat - lat) / (lat1 - lat2)) * height)
+        """Project geographic coordinates to pixel coordinates relative to center."""
+        try:
+            if tile_bounds:
+                lat1, lon1, lat2, lon2 = tile_bounds
+                x = int(width/2 + ((lon - center_lon) / (lon2 - lon1)) * width)
+                y = int(height/2 + ((center_lat - lat) / (lat1 - lat2)) * height)
+            else:
+                DEGREES_PER_TILE = 0.1
+                scale = width / DEGREES_PER_TILE
+                x = width//2 + int((lon - center_lon) * scale)
+                y = height//2 - int((lat - center_lat) * scale)
             
-            # Add bounds checking
-            x = max(0, min(width - 1, x))
-            y = max(0, min(height - 1, y))
-            
-            logging.debug(f"Projecting ({lat}, {lon}) to ({x}, {y}) using bounds: N={lat1}, S={lat2}, W={lon1}, E={lon2}")
-        else:
-            # Fallback to old calculation
-            DEGREES_PER_TILE = 0.0439  # at zoom level 12
-            scale = width / DEGREES_PER_TILE
-            x = width//2 + int((lon - center_lon) * scale)
-            y = height//2 - int((lat - center_lat) * scale)
-            
-            # Add bounds checking
-            x = max(0, min(width - 1, x))
-            y = max(0, min(height - 1, y))
-        
-        return x, y
+            return (x, y)  # Remove clamping here
+        except Exception as e:
+            logging.error(f"Projection error: {str(e)}")
+            return None
 
     def render(self, size, focus=False):
         maxcol, maxrow = size
@@ -428,46 +693,27 @@ class RadarDisplay(urwid.Widget):
                         
                         # First, determine precipitation level if any
                         if val > 0.01:
-                            precip_style = 'radar_' + (
-                                'very_light' if val <= 0.05 else  # drizzle
-                                'light' if val <= 0.1 else        # light rain
-                                'moderate' if val <= 0.2 else     # moderate rain
-                                'heavy' if val <= 0.4 else        # heavy rain
-                                'extreme'                         # extreme rain
+                            style = 'radar_' + (
+                                'very_light' if val <= 0.05 else
+                                'light' if val <= 0.1 else
+                                'moderate' if val <= 0.2 else
+                                'heavy' if val <= 0.4 else
+                                'extreme'
                             )
                         else:
-                            precip_style = None
-
-                        # Now determine what to show based on map features
-                        if map_style == 'map_label':
-                            # Labels always on top
-                            char = map_char
+                            # Use the map style if no precipitation
                             style = map_style
-                        elif map_style.startswith('map_road_'):
-                            # Roads on top of precipitation
-                            char = map_char
-                            style = map_style
-                        elif map_style in ['map_water', 'map_water_fill']:
-                            # Water features on top of precipitation
-                            char = map_char
-                            style = map_style
-                        elif precip_style:
-                            # Show precipitation where there are no other features
-                            char = self.block_char
-                            style = precip_style
-                        else:
-                            # Background or other features
-                            char = map_char
-                            style = map_style
+                        
+                        # Add the character and its style
+                        attrs.append((style, 1))
+                        line.append(map_char)
                     else:
-                        char = ' '
-                        style = 'map_background'
-                    
-                    line.append(char)
-                    attrs.append((style, 1))
+                        attrs.append((None, 1))
+                        line.append(' ')
                 
-                line_str = ''.join(line)
-                result.append((attrs, line_str.encode('utf-8')))
+                # Join the line and encode to utf-8
+                line_str = ''.join(line).encode('utf-8')
+                result.append((attrs, line_str))
 
         return urwid.TextCanvas(
             [line for _, line in result],
@@ -528,6 +774,91 @@ class RadarDisplay(urwid.Widget):
         except Exception as e:
             logging.error(f"Error updating radar: {str(e)}", exc_info=True)
 
+    def _point_in_polygon(self, x: int, y: int, polygon: List[tuple]) -> bool:
+        """Ray casting algorithm to determine if a point is inside a polygon"""
+        if len(polygon) < 3:
+            logging.debug(f"Polygon has fewer than 3 points: {len(polygon)}")
+            return False
+        
+        inside = False
+        j = len(polygon) - 1
+        
+        try:
+            for i in range(len(polygon)):
+                if ((polygon[i][1] > y) != (polygon[j][1] > y) and
+                    x < (polygon[j][0] - polygon[i][0]) * (y - polygon[i][1]) /
+                        (polygon[j][1] - polygon[i][1]) + polygon[i][0]):
+                    inside = not inside
+                j = i
+        except Exception as e:
+            logging.error(f"Point-in-polygon error at ({x}, {y}): {str(e)}")
+            return False
+        
+        return inside
+
+    def _get_element_coords(self, element: Dict, nodes: Dict, ways: Dict) -> List[tuple]:
+        """Extract coordinates from an OSM element (way or relation)"""
+        coords = []
+        if element['type'] == 'way':
+            coords = [nodes[ref] for ref in element['nodes'] if ref in nodes]
+        elif element['type'] == 'relation':
+            # Handle multipolygon relations
+            outer_coords = []
+            inner_coords = []
+            
+            for member in element.get('members', []):
+                if member['type'] == 'way' and member['ref'] in ways:
+                    way = ways[member['ref']]
+                    way_coords = [nodes[ref] for ref in way['nodes'] if ref in nodes]
+                    
+                    # Outer ways form the boundary, inner ways form holes
+                    if member.get('role') == 'inner':
+                        inner_coords.extend(way_coords)
+                    else:  # 'outer' or no role specified
+                        outer_coords.extend(way_coords)
+            
+            # Use outer boundary coordinates
+            if outer_coords:
+                coords = outer_coords
+                # TODO: Handle inner holes if needed in the future
+        
+        return coords
+
+    def _project_coords_list(self, coords: List[tuple], center_lat: float, center_lon: float, 
+                            width: int, height: int) -> List[tuple]:
+        """Project a list of coordinates to screen space"""
+        coords_2d = []
+        for coord in coords:
+            projected = self._project_coords(coord[0], coord[1], 
+                                           center_lat, center_lon, 
+                                           width, height)
+            if projected is not None:
+                coords_2d.append(projected)
+        return coords_2d
+
+    def _draw_map(self):
+        # Example UTF-8 characters you could use:
+        # '█' for solid blocks
+        # '▒' for medium shade
+        # '░' for light shade
+        # '▓' for dark shade
+        # '◉' for location marker
+        # '○' for cities
+        # '═' for roads
+        # '║' for vertical roads
+        # '╔╗╚╝' for corners
+        
+        # When creating the canvas:
+        canvas = urwid.Canvas(
+            [], 
+            self.width, 
+            self.height,
+            encoding='utf-8'  # Specify UTF-8 encoding
+        )
+        
+        # When adding text to canvas:
+        canvas.text(x, y, '█', 'radar_heavy')  # Example using UTF-8 character
+
 class RadarContainer(urwid.WidgetWrap):
     def __init__(self, widget):
         super().__init__(widget)
@@ -548,3 +879,19 @@ class RadarContainer(urwid.WidgetWrap):
 
     def sizing(self):
         return frozenset(['box']) 
+
+# Add these to the palette definition where other map styles are defined
+PALETTE = [
+    # ... existing styles ...
+    ('map_urban', 'dark gray', 'default'),  # Urban areas
+    ('map_nature', 'dark green', 'default'),  # Parks and forests
+    # ... other styles ...
+] 
+
+def check_unicode_support():
+    """Check if terminal supports Unicode characters we want to use"""
+    try:
+        '░♠'.encode(sys.stdout.encoding)
+        return True
+    except UnicodeEncodeError:
+        return False 
