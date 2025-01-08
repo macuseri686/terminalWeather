@@ -26,9 +26,10 @@ A terminal-based weather application with an interactive UI, built using Python 
 ## Installation
 
 1. Clone the repository:
-bash
+```bash
 git clone https://github.com/macuseri686/terminalWeather.git 
 cd TermWeather
+```
 
 2. Install required packages:
 ```bash
