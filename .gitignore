@@ -1,2 +1,4 @@
 .env
 weather_app.log
+__pycache__/
+*.pyc
