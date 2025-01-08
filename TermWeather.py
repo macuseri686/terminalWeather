@@ -177,6 +177,7 @@ class WeatherApp:
             ('map_ocean', 'light blue', 'dark blue'),  # Ocean areas
             ('map_urban', 'dark gray', 'default'),  # Add this for urban areas
             ('map_nature', 'dark green', 'default'),  # Add this for parks/forests
+            ('map_land', 'light gray', 'default'),  # Land areas - use default background instead of light gray
         ]
 
     def _create_current_conditions(self) -> urwid.Widget:

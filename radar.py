@@ -199,37 +199,16 @@ class RadarDisplay(urwid.Widget):
             elif element['type'] == 'way':
                 ways[element['id']] = element
 
-        # First pass: Process water bodies
-        water_bodies = 0
+        # First pass: Process large water bodies (lakes, ocean)
         for element in data['elements']:
             if element['type'] in ['way', 'relation'] and 'tags' in element:
                 tags = element['tags']
                 
-                # Expanded water body detection
-                is_water_body = False
-                
-                # Check for marine features first
+                # Check for water features
                 if (tags.get('place') in ['sea', 'ocean', 'bay', 'strait', 'sound'] or
-                    tags.get('natural') == 'strait' or
-                    tags.get('marine') == 'yes'):
-                    is_water_body = True
-                    logging.debug(f"Found marine feature: {tags}")
-                
-                # Then check for inland water bodies
-                elif ((tags.get('natural') == 'water' and tags.get('water', '') != 'river') or
-                      tags.get('water') in ['lake', 'reservoir', 'basin', 'bay']):
-                    is_water_body = True
-                    logging.debug(f"Found inland water: {tags}")
-                
-                # Finally check multipolygons
-                elif (tags.get('type') == 'multipolygon' and
-                      (tags.get('place') in ['sea', 'ocean', 'bay', 'strait', 'sound'] or
-                       tags.get('natural') in ['water', 'strait'] or
-                       tags.get('water') in ['lake', 'bay'])):
-                    is_water_body = True
-                    logging.debug(f"Found multipolygon water: {tags}")
-
-                if is_water_body:
+                    tags.get('natural') == 'water' or
+                    tags.get('water') in ['lake', 'river', 'reservoir']):
+                    
                     name = tags.get('name', 'unnamed')
                     logging.debug(f"Processing water body: {name} ({tags})")
                     
@@ -237,16 +216,7 @@ class RadarDisplay(urwid.Widget):
                     if coords:
                         coords_2d = self._project_coords_list(coords, center_lat, center_lon, width, height)
                         if len(coords_2d) >= 3:
-                            # Create a closed polygon for the water body
-                            polygon = coords_2d + [coords_2d[0]]  # Close the polygon
-                            
-                            # Draw the boundary
-                            for i in range(len(polygon) - 1):
-                                x1, y1 = polygon[i]
-                                x2, y2 = polygon[i + 1]
-                                self._draw_line_segment(char_map, style_map, x1, y1, x2, y2, '~', 'map_water')
-                            
-                            # Fill the water body using point-in-polygon test
+                            # Fill water area
                             min_x = max(0, int(min(p[0] for p in coords_2d)))
                             max_x = min(width, int(max(p[0] for p in coords_2d)) + 1)
                             min_y = max(0, int(min(p[1] for p in coords_2d)))
@@ -264,9 +234,46 @@ class RadarDisplay(urwid.Widget):
                                         style_map[y, x] = 'map_water_fill'
                                         fill_count += 1
                             
-                            logging.debug(f"Filled {fill_count} pixels for {name}")
+                            logging.debug(f"Filled {fill_count} pixels for {name} (water)")
 
-        # Second pass: Draw rivers as lines only, no filling
+        # Second pass: Process land features to cut out from water
+        for element in data['elements']:
+            if element['type'] in ['way', 'relation'] and 'tags' in element:
+                tags = element['tags']
+                
+                # Check for land features
+                if (tags.get('place') == 'island' or 
+                    tags.get('natural') == 'land' or
+                    tags.get('landuse') in ['residential', 'commercial', 'industrial']):
+                    
+                    name = tags.get('name', 'unnamed')
+                    logging.debug(f"Processing land feature: {name} ({tags})")
+                    
+                    coords = self._get_element_coords(element, nodes, ways)
+                    if coords:
+                        coords_2d = self._project_coords_list(coords, center_lat, center_lon, width, height)
+                        if len(coords_2d) >= 3:
+                            # Cut out land from water
+                            min_x = max(0, int(min(p[0] for p in coords_2d)))
+                            max_x = min(width, int(max(p[0] for p in coords_2d)) + 1)
+                            min_y = max(0, int(min(p[1] for p in coords_2d)))
+                            max_y = min(height, int(max(p[1] for p in coords_2d)) + 1)
+                            
+                            fill_count = 0
+                            for y in range(min_y, max_y):
+                                if y < 0 or y >= height:
+                                    continue
+                                for x in range(min_x, max_x):
+                                    if x < 0 or x >= width:
+                                        continue
+                                    if self._point_in_polygon(x, y, coords_2d):
+                                        char_map[y, x] = ' '
+                                        style_map[y, x] = 'map_land'
+                                        fill_count += 1
+                            
+                            logging.debug(f"Cut out {fill_count} pixels for {name} (land)")
+
+        # Third pass: Draw rivers as lines only, no filling
         for element in data['elements']:
             if element['type'] == 'way' and 'tags' in element:
                 tags = element['tags']
@@ -278,7 +285,7 @@ class RadarDisplay(urwid.Widget):
                                               center_lat, center_lon, width, height,
                                               fill=False)  # Explicitly set fill=False for rivers
 
-        # Third pass: Draw urban and natural areas
+        # Fourth pass: Draw urban and natural areas
         for element in data['elements']:
             if element['type'] in ['way', 'relation'] and 'tags' in element:
                 style = None
@@ -305,7 +312,7 @@ class RadarDisplay(urwid.Widget):
                                         char_map[y, x] = char
                                         style_map[y, x] = style
 
-        # Fourth pass: Draw roads and waterways on top
+        # Fifth pass: Draw roads and waterways on top
         for element in data['elements']:
             if element['type'] == 'way' and 'tags' in element:
                 coords = [nodes[ref] for ref in element['nodes'] if ref in nodes]

@@ -4,12 +4,36 @@ import requests
 import json
 import logging
 from typing import Dict
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Get environment variables
 UNITS = os.getenv('UNITS', 'metric').lower()  # Default to metric if not set
 TIME_FORMAT = os.getenv('TIME_FORMAT', '24')  # Default to 24-hour if not set
 API_KEY = None  # Initialize as None, will be set by the main app
 BASE_URL = "https://api.openweathermap.org/data/2.5"
+
+# Create a session with connection pooling
+session = requests.Session()
+
+# Configure retry strategy
+retry_strategy = Retry(
+    total=3,  # number of retries
+    backoff_factor=0.1,  # wait 0.1s * (2 ** (retry - 1)) between retries
+    status_forcelist=[500, 502, 503, 504]  # retry on these status codes
+)
+
+# Configure the adapter with the retry strategy and pool settings
+adapter = HTTPAdapter(
+    max_retries=retry_strategy,
+    pool_connections=10,  # number of connection pools to cache
+    pool_maxsize=10,  # number of connections to save in the pool
+    pool_block=False  # don't block when pool is full
+)
+
+# Mount the adapter for both HTTP and HTTPS
+session.mount("http://", adapter)
+session.mount("https://", adapter)
 
 def format_temperature(temp: float) -> str:
     """Format temperature based on unit setting"""
@@ -68,10 +92,17 @@ def make_api_request(endpoint: str, params: Dict = None, base_url: str = BASE_UR
             
         # Make request with timeout
         url = f"{base_url}{endpoint}"
+        
+        # Force HTTPS for all requests
+        if url.startswith('http://'):
+            url = 'https://' + url[7:]
+            
         logging.debug(f"Making API request to: {url}")
         logging.debug(f"With params: {params}")
         
-        response = requests.get(url, params=params, timeout=10)
+        # Use session instead of requests.get directly
+        # Set connect timeout to 3.05 seconds and read timeout to 6 seconds
+        response = session.get(url, params=params, timeout=(3.05, 6))
         
         # Check for unauthorized error
         if response.status_code == 401:
