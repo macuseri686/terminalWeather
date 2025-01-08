@@ -285,7 +285,6 @@ class SettingsDialog(urwid.WidgetWrap):
                 
                 # Update app settings
                 self.app.api_key = settings['OPENWEATHER_API_KEY']
-                set_api_key(self.app.api_key)  # Update API key in helpers module
                 self.app.units = settings['UNITS']
                 self.app.time_format = settings['TIME_FORMAT']
                 
@@ -301,9 +300,15 @@ class SettingsDialog(urwid.WidgetWrap):
                     else:
                         os.environ.pop(key, None)
                 
-                # After saving settings and updating environment variables, 
-                # update the app's location settings
-                self.app.update_location_settings()
+                # Create a new GeoHandler instance to pick up new location settings
+                self.app.geo_handler = self.app.geo_handler.__class__()
+                
+                # Close the settings dialog
+                if self.on_close:
+                    self.on_close()
+                
+                # Update weather with new location
+                self.app.update_weather()
                 
             except Exception as e:
                 logging.error(f"Error saving settings: {str(e)}", exc_info=True)
@@ -315,9 +320,6 @@ class SettingsDialog(urwid.WidgetWrap):
                 # Stop animation and return to main view
                 progress.stop_animation(loop)
                 self.app.loop.widget = self.app.frame
-                
-                # Refresh weather data with new location
-                self.app.update_weather()
         
         # Schedule the save
         self.app.loop.set_alarm_in(0.1, do_save)

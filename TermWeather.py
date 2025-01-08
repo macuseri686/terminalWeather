@@ -141,7 +141,7 @@ class WeatherApp:
             ('radar_default', 'black', 'black'),
             ('map_background', 'dark gray', 'dark gray'),
             ('map_road', 'white', 'dark gray'),
-            ('map_label', 'yellow', 'dark gray'),
+            ('map_label', 'yellow,bold', 'black'),
             ('map_marker', 'white,bold', 'black'),
             ('button', 'black', 'light gray'),  # Added button style
             ('button_focus', 'white,bold', 'dark blue'),  # Added button focus style
@@ -161,6 +161,14 @@ class WeatherApp:
             ('description', 'black,bold', 'light gray'),
             ('popup', 'black', 'white'),  # Add this to match AntGuardian's dialog style
             ('dialog', 'black', 'white'),  # Add this as well
+            ('map_water', 'light blue', 'dark blue'),  # Water features
+            ('map_water_fill', 'dark blue', 'dark blue'),  # Water body fill
+            ('map_road', 'black', 'light gray'),  # Roads with gray background
+            ('map_road_highway', 'white,bold', 'dark gray'),  # Highways
+            ('map_road_major', 'white', 'dark gray'),         # Trunk roads
+            ('map_road_primary', 'light gray', 'dark gray'),  # Primary roads
+            ('map_road_secondary', 'dark gray', 'dark gray'), # Secondary roads
+            ('map_road_tertiary', 'dark gray', 'dark gray'),  # Tertiary roads
         ]
 
     def _create_current_conditions(self) -> urwid.Widget:
@@ -453,11 +461,16 @@ class WeatherApp:
     def _create_radar_display(self, height: int) -> urwid.Widget:
         """Create the radar display widget"""
         # Create radar display with width set to fill available space
-        self.radar = RadarDisplay(10, height - 2)  # Height -2 for borders
+        screen = urwid.raw_display.Screen()
+        screen_width, _ = screen.get_cols_rows()
+        
+        # Use full screen width for the radar
+        self.radar = RadarDisplay(screen_width - 2, height - 2)  # -2 for borders
+        logging.debug(f"Created radar display with size: {screen_width-2}x{height-2}")
         
         # Create a fixed-size box for the radar
         radar_box = urwid.BoxAdapter(
-            self.radar,  # Use radar directly without columns
+            self.radar,
             height - 2  # Match the height we want, accounting for borders
         )
         return urwid.AttrMap(urwid.LineBox(
@@ -510,33 +523,47 @@ class WeatherApp:
     def _update_radar(self, lat: float, lon: float) -> None:
         """Update the radar display"""
         try:
-            zoom = 8  # Fixed zoom level (0-19, where 0 is most zoomed out)
-            lat_rad = math.radians(lat)  # Convert latitude to radians
-            n = 2.0 ** zoom  # Number of tiles at this zoom level(2^zoom)
+            zoom = 11  # Changed from 12 to 11 to zoom out
+            lat_rad = math.radians(lat)
+            n = 2.0 ** zoom
             
-            # Convert longitude to tile X coordinate
-            x = int((lon + 180.0) / 360.0 * n)
+            # Convert coordinates to tile numbers
+            xtile = int((lon + 180.0) / 360.0 * n)
+            ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
             
-            # Convert latitude to tile Y coordinate using Mercator projection
-            y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+            # Calculate tile bounds using Mercator projection formulas
+            def lat_from_y(y, n_tiles):
+                n = math.pi - 2.0 * math.pi * y / n_tiles
+                return math.degrees(math.atan(math.sinh(n)))
             
-            # Use precipitation layer only since map layers require subscription
+            def lon_from_x(x, n_tiles):
+                return x * 360.0 / n_tiles - 180.0
+            
+            # Calculate bounds
+            lat1 = lat_from_y(ytile, n)  # North latitude
+            lat2 = lat_from_y(ytile + 1, n)  # South latitude
+            lon1 = lon_from_x(xtile, n)  # West longitude
+            lon2 = lon_from_x(xtile + 1, n)  # East longitude
+            
+            logging.debug(f"Tile bounds: N={lat1:.4f}, S={lat2:.4f}, W={lon1:.4f}, E={lon2:.4f}")
+            
+            # Re-enable radar data fetching
             radar_data = download_binary(
-                f"/map/precipitation_new/{zoom}/{x}/{y}.png",
+                f"/map/precipitation_new/{zoom}/{xtile}/{ytile}.png",
                 base_url="https://tile.openweathermap.org"
             )
             
-            # Create a blank base map
-            blank_map = np.zeros((256, 256), dtype=np.uint8)  # Standard tile size is 256x256
-            blank_map_bytes = io.BytesIO()
-            Image.fromarray(blank_map).save(blank_map_bytes, format='PNG')
-            blank_map_bytes.seek(0)
+            # Get map features from Overpass API
+            overpass_data = self.radar._fetch_overpass_data(lat, lon)
             
-            # Update radar display with precipitation layer and blank base map
+            # Update radar display
             self.radar.update_radar(
                 radar_data,
-                blank_map_bytes.getvalue(),
-                location_name=self.geo_handler.get_current_location()  # Pass current location name
+                overpass_data,
+                location_name=self.geo_handler.get_current_location(),
+                center_lat=lat,
+                center_lon=lon,
+                tile_bounds=(lat1, lon1, lat2, lon2)
             )
             
         except Exception as e:

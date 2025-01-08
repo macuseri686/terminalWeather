@@ -5,7 +5,7 @@ from helpers import make_api_request
 
 class GeoHandler:
     def __init__(self):
-        self.default_zip = os.getenv('DEFAULT_ZIP', '98272')  # Default to Monroe, WA
+        self.default_zip = os.getenv('DEFAULT_ZIP', '')  # Remove default zip
         self.default_country = os.getenv('DEFAULT_COUNTRY', 'US')
         self.default_city = os.getenv('DEFAULT_CITY', '')
         self.default_state = os.getenv('DEFAULT_STATE', '')
@@ -14,10 +14,15 @@ class GeoHandler:
     def get_location_coords(self) -> Tuple[float, float]:
         """Get coordinates for the current location"""
         try:
-            if self.default_zip:
+            # Check for city first, then fall back to zip
+            if self.default_city:
+                return self._get_coords_from_city()
+            elif self.default_zip:
                 return self._get_coords_from_zip()
             else:
-                return self._get_coords_from_city()
+                # If neither is set, default to Monroe, WA
+                logging.warning("No location set, defaulting to Monroe, WA")
+                return 47.8557, -121.9715
         except Exception as e:
             logging.error(f"Error getting location coordinates: {str(e)}", exc_info=True)
             # Default to Monroe, WA coordinates if there's an error
