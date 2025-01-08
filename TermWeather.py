@@ -92,6 +92,56 @@ class ErrorDialog(urwid.WidgetWrap):
     def _on_close(self, button):
         raise urwid.ExitMainLoop()
 
+class ProgressDialog(urwid.WidgetWrap):
+    def __init__(self, message="Loading..."):
+        self.position = 0
+        self.message = message
+        self.throbber_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        
+        # Create separate widgets for throbber and message
+        self.throbber = urwid.Text('', align='center')
+        self.text = urwid.Text(message, align='center')
+        self._update_text()
+        
+        # Create the layout with throbber and message on separate lines
+        pile = urwid.Pile([
+            urwid.Text(''),  # Top spacing
+            self.throbber,   # Throbber on its own line
+            self.text,       # Message below throbber
+            urwid.Text(''),  # Bottom spacing
+        ])
+        
+        # Create a LineBox with padding
+        box = urwid.LineBox(
+            urwid.Padding(urwid.Filler(pile), left=2, right=2),
+            title="Please Wait"
+        )
+        
+        self._w = urwid.AttrMap(box, 'dialog')
+        
+        # Start the animation
+        self.animate_alarm = None
+    
+    def _update_text(self):
+        """Update the throbber"""
+        throbber = self.throbber_chars[self.position]
+        self.throbber.set_text(throbber)
+    
+    def start_animation(self, loop):
+        """Start the throbber animation"""
+        self.animate_alarm = loop.set_alarm_in(0.1, self._animate)
+    
+    def _animate(self, loop, user_data):
+        """Animate the throbber"""
+        self.position = (self.position + 1) % len(self.throbber_chars)
+        self._update_text()
+        self.animate_alarm = loop.set_alarm_in(0.1, self._animate)
+    
+    def stop_animation(self, loop):
+        """Stop the throbber animation"""
+        if self.animate_alarm:
+            loop.remove_alarm(self.animate_alarm)
+
 class SettingsDialog(urwid.WidgetWrap):
     def __init__(self, app, on_close: Optional[Callable] = None):
         self.app = app
@@ -328,68 +378,85 @@ class SettingsDialog(urwid.WidgetWrap):
             self._show_error(f"Error searching location: {str(e)}")
 
     def _on_save(self, button):
-        # Save settings to .env file
-        settings = {
-            'OPENWEATHER_API_KEY': self.api_key_edit.edit_text,
-            'UNITS': 'metric' if self.metric.state else 'imperial',
-            'TIME_FORMAT': '24' if self.time_24.state else '12',
-            'DEFAULT_COUNTRY': self.country_edit.edit_text.strip()
-        }
+        # Show progress dialog
+        progress = ProgressDialog("Loading weather")
         
-        # Add location settings based on type
-        if self.zip_type.state:
-            settings['DEFAULT_ZIP'] = self.location_edit.edit_text.strip()
-            # Clear any city-related settings
-            settings['DEFAULT_CITY'] = ''
-            settings['DEFAULT_STATE'] = ''
-        else:
-            # Clear ZIP settings
-            settings['DEFAULT_ZIP'] = ''
-            # Parse city and state
-            parts = [p.strip() for p in self.location_edit.edit_text.split(',')]
-            settings['DEFAULT_CITY'] = parts[0] if parts else ''
-            settings['DEFAULT_STATE'] = parts[1] if len(parts) > 1 else ''
+        # Calculate dialog size
+        screen = urwid.raw_display.Screen()
+        screen_cols, screen_rows = screen.get_cols_rows()
+        dialog_width = int(screen_cols * 0.3)
+        dialog_height = int(screen_rows * 0.2)
         
-        logging.debug(f"Saving settings: {settings}")
+        # Create overlay for progress dialog
+        overlay = urwid.Overlay(
+            progress,
+            self.app.frame,  # Use main frame as bottom widget
+            'center', dialog_width,
+            'middle', dialog_height
+        )
         
-        try:
-            # Write to .env file
-            with open('.env', 'w') as f:
+        # Set the overlay as the active widget and start animation
+        self.app.loop.widget = overlay
+        progress.start_animation(self.app.loop)
+        
+        # Schedule the actual save to happen after the dialog is shown
+        def do_save(loop, user_data):
+            try:
+                # Save settings to .env file
+                settings = {
+                    'OPENWEATHER_API_KEY': self.api_key_edit.edit_text,
+                    'UNITS': 'metric' if self.metric.state else 'imperial',
+                    'TIME_FORMAT': '24' if self.time_24.state else '12',
+                    'DEFAULT_COUNTRY': self.country_edit.edit_text.strip()
+                }
+                
+                # Add location settings based on type
+                if self.zip_type.state:
+                    settings['DEFAULT_ZIP'] = self.location_edit.edit_text.strip()
+                    settings['DEFAULT_CITY'] = ''
+                    settings['DEFAULT_STATE'] = ''
+                else:
+                    settings['DEFAULT_ZIP'] = ''
+                    parts = [p.strip() for p in self.location_edit.edit_text.split(',')]
+                    settings['DEFAULT_CITY'] = parts[0] if parts else ''
+                    settings['DEFAULT_STATE'] = parts[1] if len(parts) > 1 else ''
+                
+                logging.debug(f"Saving settings: {settings}")
+                
+                # Write to .env file
+                with open('.env', 'w') as f:
+                    for key, value in settings.items():
+                        if value:  # Only write non-empty values
+                            f.write(f'{key}={value}\n')
+                
+                # Update app settings
+                self.app.api_key = settings['OPENWEATHER_API_KEY']
+                self.app.units = settings['UNITS']
+                self.app.time_format = settings['TIME_FORMAT']
+                
+                # Update environment variables
                 for key, value in settings.items():
-                    if value:  # Only write non-empty values
-                        f.write(f'{key}={value}\n')
+                    if value:
+                        os.environ[key] = value
+                    else:
+                        os.environ.pop(key, None)
+                
+            except Exception as e:
+                logging.error(f"Error saving settings: {str(e)}", exc_info=True)
+                progress.stop_animation(loop)
+                self.app.show_error(f"Error saving settings: {str(e)}")
+                return
             
-            # Update app settings
-            self.app.api_key = settings['OPENWEATHER_API_KEY']
-            self.app.units = settings['UNITS']
-            self.app.time_format = settings['TIME_FORMAT']
-            
-            # Update environment variables
-            os.environ['OPENWEATHER_API_KEY'] = settings['OPENWEATHER_API_KEY']
-            os.environ['UNITS'] = settings['UNITS']
-            os.environ['TIME_FORMAT'] = settings['TIME_FORMAT']
-            os.environ['DEFAULT_COUNTRY'] = settings['DEFAULT_COUNTRY']
-            
-            if settings['DEFAULT_ZIP']:
-                os.environ['DEFAULT_ZIP'] = settings['DEFAULT_ZIP']
-                os.environ.pop('DEFAULT_CITY', None)
-                os.environ.pop('DEFAULT_STATE', None)
-            else:
-                os.environ.pop('DEFAULT_ZIP', None)
-                if settings['DEFAULT_CITY']:
-                    os.environ['DEFAULT_CITY'] = settings['DEFAULT_CITY']
-                if settings['DEFAULT_STATE']:
-                    os.environ['DEFAULT_STATE'] = settings['DEFAULT_STATE']
-            
-            # Return to main view
-            self.app.loop.widget = self.app.frame
-            
-            # Refresh weather data
-            self.app.update_weather()
-            
-        except Exception as e:
-            logging.error(f"Error saving settings: {str(e)}", exc_info=True)
-            self._show_error(f"Error saving settings: {str(e)}")
+            finally:
+                # Stop animation and return to main view
+                progress.stop_animation(loop)
+                self.app.loop.widget = self.app.frame
+                
+                # Refresh weather data
+                self.app.update_weather()
+        
+        # Schedule the save
+        self.app.loop.set_alarm_in(0.1, do_save)
 
     def _on_cancel(self, button):
         if self.on_close:
@@ -457,23 +524,49 @@ class LocationDialog(urwid.WidgetWrap):
     def _on_select(self, button, location):
         logging.debug(f"Selected location: {location}")
         
-        # Update parent dialog with selected location
-        if self.parent_dialog.zip_type.state:
-            # For ZIP code search, keep the original ZIP code
-            # The ZIP is still in the parent dialog's location_edit
-            pass  # Don't modify the ZIP code field
-        else:
-            # For city search, format the full location string
-            name_parts = [location['name']]
-            if location.get('state'):
-                name_parts.append(location['state'])
-            self.parent_dialog.location_edit.set_edit_text(', '.join(name_parts))
-            
-        # Update country
-        self.parent_dialog.country_edit.set_edit_text(location['country'])
+        # Show progress dialog
+        progress = ProgressDialog("Loading weather")
         
-        # Return to settings dialog
-        self.app.loop.widget = self.app.settings_overlay
+        # Calculate dialog size
+        screen = urwid.raw_display.Screen()
+        screen_cols, screen_rows = screen.get_cols_rows()
+        dialog_width = int(screen_cols * 0.3)
+        dialog_height = int(screen_rows * 0.2)
+        
+        # Create overlay for progress dialog
+        overlay = urwid.Overlay(
+            progress,
+            self.app.frame,  # Use main frame as bottom widget
+            'center', dialog_width,
+            'middle', dialog_height
+        )
+        
+        # Set the overlay as the active widget and start animation
+        self.app.loop.widget = overlay
+        progress.start_animation(self.app.loop)
+        
+        # Schedule the actual update to happen after the dialog is shown
+        def do_update(loop, user_data):
+            try:
+                # Update parent dialog with selected location
+                if self.parent_dialog.zip_type.state:
+                    pass  # Don't modify the ZIP code field
+                else:
+                    name_parts = [location['name']]
+                    if location.get('state'):
+                        name_parts.append(location['state'])
+                    self.parent_dialog.location_edit.set_edit_text(', '.join(name_parts))
+                
+                # Update country
+                self.parent_dialog.country_edit.set_edit_text(location['country'])
+                
+            finally:
+                # Stop animation and return to settings dialog
+                progress.stop_animation(loop)
+                self.app.loop.widget = self.app.settings_overlay
+        
+        # Schedule the update
+        self.app.loop.set_alarm_in(0.1, do_update)
 
     def _on_cancel(self, button):
         # Return to settings dialog
@@ -1481,16 +1574,41 @@ class WeatherApp:
 
     def run(self) -> None:
         """Start the application"""
-        # Use overlay instead of frame
-        self.loop = urwid.MainLoop(self.overlay, self.palette)
-        # Schedule the first update to happen right after the loop starts
+        # Show initial loading dialog
+        progress = ProgressDialog("Loading weather")
+        
+        # Calculate dialog size
+        screen = urwid.raw_display.Screen()
+        screen_cols, screen_rows = screen.get_cols_rows()
+        dialog_width = int(screen_cols * 0.3)
+        dialog_height = int(screen_rows * 0.2)
+        
+        # Create overlay for progress dialog
+        self.loading_overlay = urwid.Overlay(
+            progress,
+            self.overlay,  # Use main overlay as bottom widget
+            'center', dialog_width,
+            'middle', dialog_height
+        )
+        
+        # Use loading overlay as initial widget
+        self.loop = urwid.MainLoop(self.loading_overlay, self.palette)
+        
+        # Start the loading animation
+        progress.start_animation(self.loop)
+        
+        # Schedule the first update
         self.loop.set_alarm_in(0.1, self._first_update)
         self.loop.run()
 
     def _first_update(self, loop, user_data):
         """Initial weather update after UI starts"""
         logging.debug("Starting first update")
-        self.update_weather()
+        try:
+            self.update_weather()
+        finally:
+            # Switch to main view after update (whether it succeeded or failed)
+            self.loop.widget = self.overlay
 
     def show_settings(self, button=None):
         """Show the settings dialog"""
