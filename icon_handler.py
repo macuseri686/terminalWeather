@@ -97,7 +97,7 @@ class LargeWeatherIcons:
         "01n": [
             ('star', "    *  *   *"),
             ('star', "\n  *    "),
-            ('moon', "█🌙█"),
+            ('moon', " 🌙 "),
             ('star', """   *
      *    *
   *     *   *

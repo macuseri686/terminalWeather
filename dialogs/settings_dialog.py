@@ -301,6 +301,10 @@ class SettingsDialog(urwid.WidgetWrap):
                     else:
                         os.environ.pop(key, None)
                 
+                # After saving settings and updating environment variables, 
+                # update the app's location settings
+                self.app.update_location_settings()
+                
             except Exception as e:
                 logging.error(f"Error saving settings: {str(e)}", exc_info=True)
                 progress.stop_animation(loop)
@@ -312,7 +316,7 @@ class SettingsDialog(urwid.WidgetWrap):
                 progress.stop_animation(loop)
                 self.app.loop.widget = self.app.frame
                 
-                # Refresh weather data
+                # Refresh weather data with new location
                 self.app.update_weather()
         
         # Schedule the save

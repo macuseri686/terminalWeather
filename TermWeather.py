@@ -510,10 +510,14 @@ class WeatherApp:
     def _update_radar(self, lat: float, lon: float) -> None:
         """Update the radar display"""
         try:
-            zoom = 8
-            lat_rad = math.radians(lat)
-            n = 2.0 ** zoom
+            zoom = 8  # Fixed zoom level (0-19, where 0 is most zoomed out)
+            lat_rad = math.radians(lat)  # Convert latitude to radians
+            n = 2.0 ** zoom  # Number of tiles at this zoom level(2^zoom)
+            
+            # Convert longitude to tile X coordinate
             x = int((lon + 180.0) / 360.0 * n)
+            
+            # Convert latitude to tile Y coordinate using Mercator projection
             y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
             
             # Use precipitation layer only since map layers require subscription
@@ -707,6 +711,11 @@ class WeatherApp:
     def show_error(self, message):
         """Show error message"""
         self._show_error(message)
+
+    def update_location_settings(self):
+        """Update location settings from environment variables"""
+        # Reinitialize the geo_handler to pick up new settings
+        self.geo_handler = GeoHandler()
 
 def main():
     if not API_KEY:

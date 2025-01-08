@@ -31,6 +31,14 @@ class RadarDisplay(urwid.Widget):
             
             # Resize radar data to fit display area
             image_radar = Image.fromarray((self.radar_data * 255).astype('uint8'))
+            
+            # Save the radar image for debugging
+            try:
+                image_radar.save('debug_radar.png')
+                logging.debug("Saved radar debug image to debug_radar.png")
+            except Exception as e:
+                logging.error(f"Failed to save debug radar image: {str(e)}")
+            
             image_radar = image_radar.resize((maxcol, maxrow))
             radar_data = np.array(image_radar) / 255.0
             
