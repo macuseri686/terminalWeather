@@ -10,17 +10,36 @@ import numpy as np
 from PIL import Image
 import io
 import math
+from helpers import (
+    format_temperature,
+    format_wind_speed,
+    format_time,
+    is_hot_temperature,
+    make_api_request,
+    set_api_key,
+    set_units,
+    set_time_format,
+    download_binary
+)
+from dialogs.error_dialog import ErrorDialog
+from dialogs.progress_dialog import ProgressDialog
+from dialogs.location_dialog import LocationDialog
+from dialogs.settings_dialog import SettingsDialog
+from icon_handler import WeatherIcons, LargeWeatherIcons
+from radar import RadarDisplay, RadarContainer
+from geo_handler import GeoHandler
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Get API key from environment variables
 API_KEY = os.getenv('OPENWEATHER_API_KEY')
+if API_KEY:
+    set_api_key(API_KEY)  # Set the API key in helpers module
 DEFAULT_ZIP = os.getenv('DEFAULT_ZIP', '98272')  # Default to Monroe, WA if not set
 DEFAULT_COUNTRY = os.getenv('DEFAULT_COUNTRY', 'US')  # Default to US if not set
 UNITS = os.getenv('UNITS', 'metric').lower()  # Default to metric if not set
 TIME_FORMAT = os.getenv('TIME_FORMAT', '24')  # Default to 24-hour if not set
-BASE_URL = "https://api.openweathermap.org/data/2.5"  # Changed to 2.5 as 3.0 requires subscription
 
 # Add this near the top of the file, after imports
 logging.basicConfig(
@@ -29,901 +48,17 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Add these helper functions after the imports
-def format_temperature(temp: float) -> str:
-    """Format temperature based on unit setting"""
-    if UNITS == 'imperial':
-        return f"{temp:.1f}°F"
-    return f"{temp:.1f}°C"
-
-def format_wind_speed(speed: float) -> str:
-    """Format wind speed based on unit setting"""
-    if UNITS == 'imperial':
-        return f"{speed:.1f} mph"
-    return f"{speed:.1f} m/s"
-
-def format_time(dt: datetime.datetime) -> str:
-    """Format time based on time format setting"""
-    if TIME_FORMAT == '12':
-        return dt.strftime("%I:%M %p")
-    return dt.strftime("%H:%M")
-
-def is_hot_temperature(temp: float) -> bool:
-    """Determine if a temperature is considered hot based on units"""
-    if UNITS == 'imperial':
-        return temp > 68  # 68°F = 20°C
-    return temp > 20  # 20°C
-
-class ErrorDialog(urwid.WidgetWrap):
-    def __init__(self, error_msg, app, retry_callback=None):
-        self.app = app
-        self.retry_callback = retry_callback
-        
-        # Create buttons
-        retry_btn = urwid.Button("Retry", on_press=self._on_retry)
-        close_btn = urwid.Button("Exit", on_press=self._on_close)
-        retry_btn = urwid.AttrMap(retry_btn, 'button', focus_map='button_focus')
-        close_btn = urwid.AttrMap(close_btn, 'button', focus_map='highlight_red')
-        
-        buttons = urwid.GridFlow([retry_btn, close_btn], 12, 3, 1, 'center')
-        
-        # Create error message
-        pile = urwid.Pile([
-            urwid.Text(''),
-            urwid.Text(error_msg, align='center'),
-            urwid.Text(''),
-            buttons,
-            urwid.Text('')
-        ])
-        
-        fill = urwid.Filler(pile, 'middle')
-        box = urwid.LineBox(
-            urwid.Padding(fill, left=2, right=2),
-            title="Error"
-        )
-        self._w = urwid.AttrMap(box, 'error_dialog')
-    
-    def _on_retry(self, button):
-        if self.retry_callback:
-            self.retry_callback()
-        # Remove dialog and return to main view
-        self.app.loop.widget = self.app.frame
-    
-    def _on_close(self, button):
-        raise urwid.ExitMainLoop()
-
-class ProgressDialog(urwid.WidgetWrap):
-    def __init__(self, message="Loading..."):
-        self.position = 0
-        self.message = message
-        self.throbber_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-        
-        # Create separate widgets for throbber and message
-        self.throbber = urwid.Text('', align='center')
-        self.text = urwid.Text(message, align='center')
-        self._update_text()
-        
-        # Create the layout with throbber and message on separate lines
-        pile = urwid.Pile([
-            urwid.Text(''),  # Top spacing
-            self.throbber,   # Throbber on its own line
-            self.text,       # Message below throbber
-            urwid.Text(''),  # Bottom spacing
-        ])
-        
-        # Create a LineBox with padding
-        box = urwid.LineBox(
-            urwid.Padding(urwid.Filler(pile), left=2, right=2),
-            title="Please Wait"
-        )
-        
-        self._w = urwid.AttrMap(box, 'dialog')
-        
-        # Start the animation
-        self.animate_alarm = None
-    
-    def _update_text(self):
-        """Update the throbber"""
-        throbber = self.throbber_chars[self.position]
-        self.throbber.set_text(throbber)
-    
-    def start_animation(self, loop):
-        """Start the throbber animation"""
-        self.animate_alarm = loop.set_alarm_in(0.1, self._animate)
-    
-    def _animate(self, loop, user_data):
-        """Animate the throbber"""
-        self.position = (self.position + 1) % len(self.throbber_chars)
-        self._update_text()
-        self.animate_alarm = loop.set_alarm_in(0.1, self._animate)
-    
-    def stop_animation(self, loop):
-        """Stop the throbber animation"""
-        if self.animate_alarm:
-            loop.remove_alarm(self.animate_alarm)
-
-class SettingsDialog(urwid.WidgetWrap):
-    def __init__(self, app, on_close: Optional[Callable] = None):
-        self.app = app
-        self.on_close = on_close
-        
-        # Create input fields
-        self.api_key_edit = urwid.Edit("API Key: ", app.api_key)
-        
-        # Determine initial location type and value from env
-        initial_is_city = not bool(os.getenv('DEFAULT_ZIP'))
-        initial_location = ""
-        initial_country = os.getenv('DEFAULT_COUNTRY', 'US')
-        
-        if initial_is_city:
-            initial_location = os.getenv('DEFAULT_CITY', '')
-            if os.getenv('DEFAULT_STATE'):
-                initial_location += f", {os.getenv('DEFAULT_STATE')}"
-        else:
-            initial_location = os.getenv('DEFAULT_ZIP', '')
-        
-        self.location_edit = urwid.Edit(
-            "City, State: " if initial_is_city else "ZIP Code: ", 
-            initial_location
-        )
-        
-        self.country_edit = urwid.Edit("Country Code: ", initial_country)
-        
-        # Create radio button group for location type
-        self.location_group = []  # Initialize the group list
-        self.location_type = urwid.RadioButton(
-            self.location_group, 'City Name', 
-            state=initial_is_city, 
-            on_state_change=self._on_location_type_change
-        )
-        self.zip_type = urwid.RadioButton(
-            self.location_group, 'ZIP Code',  
-            state=not initial_is_city,
-            on_state_change=self._on_location_type_change  # Add handler to this button too
-        )
-        
-        # Create radio button group for units
-        self.units_group = []  # Initialize the group list
-        self.metric = urwid.RadioButton(
-            self.units_group, 'Metric', 
-            state=app.units == 'metric'
-        )
-        self.imperial = urwid.RadioButton(
-            self.units_group, 'Imperial', 
-            state=app.units == 'imperial'
-        )
-        
-        # Create radio button group for time format
-        self.time_group = []  # Initialize the group list
-        self.time_24 = urwid.RadioButton(
-            self.time_group, '24-hour', 
-            state=app.time_format == '24'
-        )
-        self.time_12 = urwid.RadioButton(
-            self.time_group, '12-hour', 
-            state=app.time_format == '12'
-        )
-        
-        # Create buttons
-        save_btn = urwid.Button("Save", on_press=self._on_save)
-        cancel_btn = urwid.Button("Cancel", on_press=self._on_cancel)
-        search_btn = urwid.Button("Search Location", on_press=self._on_search)
-        
-        # Style buttons
-        save_btn = urwid.AttrMap(save_btn, 'button', focus_map='button_focus')
-        cancel_btn = urwid.AttrMap(cancel_btn, 'button', focus_map='button_focus')
-        search_btn = urwid.AttrMap(search_btn, 'button', focus_map='button_focus')
-        
-        # Create API key section
-        api_section = urwid.LineBox(
-            urwid.Padding(self.api_key_edit, left=1, right=1),
-            title="API Key"
-        )
-        
-        # Create location section
-        location_section = urwid.LineBox(
-            urwid.Pile([
-                urwid.Text("Location Type:"),
-                self.location_type,
-                self.zip_type,
-                urwid.Divider(),
-                self.location_edit,
-                self.country_edit,
-                urwid.Divider(),
-                search_btn,
-            ]),
-            title="Location"
-        )
-        
-        # Create units section
-        units_section = urwid.LineBox(
-            urwid.Pile([
-                self.metric,
-                self.imperial,
-            ]),
-            title="Units"
-        )
-        
-        # Create time format section
-        time_section = urwid.LineBox(
-            urwid.Pile([
-                self.time_24,
-                self.time_12,
-            ]),
-            title="Time Format"
-        )
-        
-        # Create the main content with sections
-        content_pile = urwid.Pile([
-            api_section,
-            urwid.Divider(),
-            location_section,
-            urwid.Divider(),
-            units_section,
-            urwid.Divider(),
-            time_section,
-        ])
-        
-        # Create button row with padding
-        button_row = urwid.Columns([
-            ('weight', 1, urwid.Padding(save_btn, width=12, align='right')),
-            ('fixed', 4, urwid.Text('')),  # Add 4 spaces padding between buttons
-            ('weight', 1, urwid.Padding(cancel_btn, width=12, align='left')),
-        ])
-        
-        # Create footer with padding above buttons
-        footer = urwid.Pile([
-            urwid.Divider(),  # Add space above buttons
-            button_row,
-            urwid.Divider(),  # Add space below buttons
-        ])
-        
-        # Combine content and footer in a Frame
-        frame = urwid.Frame(
-            urwid.Filler(content_pile, valign='top'),
-            footer=footer
-        )
-        
-        # Create a LineBox with padding
-        box = urwid.LineBox(
-            urwid.Padding(frame, left=2, right=2),
-            title="Settings"
-        )
-        
-        # Use popup style from AntGuardian
-        self._w = urwid.AttrMap(box, 'popup')
-
-    def _on_location_type_change(self, radio, new_state):
-        """Handle location type change"""
-        # Only handle when a button is selected (not when deselected)
-        if new_state:
-            is_city = (radio == self.location_type)
-            self.location_edit.set_caption("City, State: " if is_city else "ZIP Code: ")
-            self.location_edit.set_edit_text("")
-
-    def _on_search(self, button):
-        location = self.location_edit.edit_text.strip()
-        country = self.country_edit.edit_text.strip()
-        
-        logging.debug(f"Searching for location: {location}, country: {country}")
-        logging.debug(f"Search type: {'city' if self.location_type.state else 'zip'}")
-        
-        if not location:
-            self._show_error("Please enter a location")
-            return
-            
-        try:
-            if self.location_type.state:
-                # Search by city name
-                url = "http://api.openweathermap.org/geo/1.0/direct"
-                search_query = location
-                if country:
-                    search_query += f",{country}"
-                    
-                params = {
-                    "q": search_query,
-                    "limit": 5,
-                    "appid": self.api_key_edit.edit_text
-                }
-            else:
-                # Search by ZIP code
-                url = "http://api.openweathermap.org/geo/1.0/zip"
-                params = {
-                    "zip": f"{location},{country or 'US'}",
-                    "appid": self.api_key_edit.edit_text
-                }
-            
-            logging.debug(f"Making request to: {url}")
-            logging.debug(f"With params: {params}")
-            
-            response = requests.get(url, params=params, timeout=10)  # Add timeout
-            logging.debug(f"Response status code: {response.status_code}")
-            logging.debug(f"Response content: {response.text}")
-            
-            response.raise_for_status()
-            location_data = response.json()
-            
-            if self.location_type.state:
-                # City search
-                if not location_data:
-                    self._show_error("No locations found")
-                    return
-                locations = location_data
-            else:
-                # ZIP search
-                if 'cod' in location_data and str(location_data['cod']) != '200':
-                    self._show_error(location_data.get('message', 'Location not found'))
-                    return
-                    
-                # Format the location data to match the city search format
-                locations = [{
-                    'name': location_data['name'],
-                    'country': location_data['country'],
-                    'state': '',
-                    'lat': location_data['lat'],
-                    'lon': location_data['lon']
-                }]
-            
-            logging.debug(f"Found locations: {locations}")
-            self.show_location_dialog(locations)
-            
-        except requests.exceptions.Timeout:
-            logging.error("Request timed out")
-            self._show_error("Request timed out. Please try again.")
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Network error: {str(e)}", exc_info=True)
-            self._show_error(f"Network error: {str(e)}")
-        except Exception as e:
-            logging.error(f"Error searching location: {str(e)}", exc_info=True)
-            self._show_error(f"Error searching location: {str(e)}")
-
-    def _on_save(self, button):
-        # Show progress dialog
-        progress = ProgressDialog("Loading weather")
-        
-        # Calculate dialog size
-        screen = urwid.raw_display.Screen()
-        screen_cols, screen_rows = screen.get_cols_rows()
-        dialog_width = int(screen_cols * 0.3)
-        dialog_height = int(screen_rows * 0.2)
-        
-        # Create overlay for progress dialog
-        overlay = urwid.Overlay(
-            progress,
-            self.app.frame,  # Use main frame as bottom widget
-            'center', dialog_width,
-            'middle', dialog_height
-        )
-        
-        # Set the overlay as the active widget and start animation
-        self.app.loop.widget = overlay
-        progress.start_animation(self.app.loop)
-        
-        # Schedule the actual save to happen after the dialog is shown
-        def do_save(loop, user_data):
-            try:
-                # Save settings to .env file
-                settings = {
-                    'OPENWEATHER_API_KEY': self.api_key_edit.edit_text,
-                    'UNITS': 'metric' if self.metric.state else 'imperial',
-                    'TIME_FORMAT': '24' if self.time_24.state else '12',
-                    'DEFAULT_COUNTRY': self.country_edit.edit_text.strip()
-                }
-                
-                # Add location settings based on type
-                if self.zip_type.state:
-                    settings['DEFAULT_ZIP'] = self.location_edit.edit_text.strip()
-                    settings['DEFAULT_CITY'] = ''
-                    settings['DEFAULT_STATE'] = ''
-                else:
-                    settings['DEFAULT_ZIP'] = ''
-                    parts = [p.strip() for p in self.location_edit.edit_text.split(',')]
-                    settings['DEFAULT_CITY'] = parts[0] if parts else ''
-                    settings['DEFAULT_STATE'] = parts[1] if len(parts) > 1 else ''
-                
-                logging.debug(f"Saving settings: {settings}")
-                
-                # Write to .env file
-                with open('.env', 'w') as f:
-                    for key, value in settings.items():
-                        if value:  # Only write non-empty values
-                            f.write(f'{key}={value}\n')
-                
-                # Update app settings
-                self.app.api_key = settings['OPENWEATHER_API_KEY']
-                self.app.units = settings['UNITS']
-                self.app.time_format = settings['TIME_FORMAT']
-                
-                # Update environment variables
-                for key, value in settings.items():
-                    if value:
-                        os.environ[key] = value
-                    else:
-                        os.environ.pop(key, None)
-                
-            except Exception as e:
-                logging.error(f"Error saving settings: {str(e)}", exc_info=True)
-                progress.stop_animation(loop)
-                self.app.show_error(f"Error saving settings: {str(e)}")
-                return
-            
-            finally:
-                # Stop animation and return to main view
-                progress.stop_animation(loop)
-                self.app.loop.widget = self.app.frame
-                
-                # Refresh weather data
-                self.app.update_weather()
-        
-        # Schedule the save
-        self.app.loop.set_alarm_in(0.1, do_save)
-
-    def _on_cancel(self, button):
-        if self.on_close:
-            self.on_close()
-
-    def _show_error(self, message):
-        self.app.show_error(message)
-
-    def show_location_dialog(self, locations):
-        """Show location selection dialog"""
-        dialog = LocationDialog(locations, self.app, self)
-        
-        # Calculate dialog size
-        screen = urwid.raw_display.Screen()
-        screen_cols, screen_rows = screen.get_cols_rows()
-        dialog_width = int(screen_cols * 0.6)
-        dialog_height = int(screen_rows * 0.6)
-        
-        # Create overlay for location dialog on top of settings dialog
-        overlay = urwid.Overlay(
-            dialog,
-            self.app.settings_overlay,  # Use the settings overlay as bottom widget
-            'center', dialog_width,
-            'middle', dialog_height
-        )
-        
-        # Set the overlay as the active widget
-        self.app.loop.widget = overlay
-
-class LocationDialog(urwid.WidgetWrap):
-    def __init__(self, locations, app, parent_dialog, on_close=None):
-        self.app = app
-        self.parent_dialog = parent_dialog
-        self.on_close = on_close
-        
-        # Create location buttons
-        location_buttons = []
-        for loc in locations:
-            name = f"{loc['name']}, {loc.get('state', '')}, {loc['country']}"
-            btn = urwid.Button(name.strip().strip(','), on_press=self._on_select, user_data=loc)
-            btn = urwid.AttrMap(btn, 'button', focus_map='button_focus')
-            location_buttons.append(btn)
-        
-        # Add cancel button
-        cancel_btn = urwid.Button("Cancel", on_press=self._on_cancel)
-        cancel_btn = urwid.AttrMap(cancel_btn, 'button', focus_map='button_focus')
-        location_buttons.append(urwid.Divider())
-        location_buttons.append(cancel_btn)
-        
-        # Create the layout
-        pile = urwid.Pile([
-            urwid.Text("Select Location", align='center'),
-            urwid.Divider(),
-            *location_buttons
-        ])
-        
-        # Create a LineBox with padding
-        box = urwid.LineBox(
-            urwid.Padding(pile, left=2, right=2),
-            title="Location Results"
-        )
-        
-        self._w = urwid.AttrMap(box, 'dialog')
-
-    def _on_select(self, button, location):
-        logging.debug(f"Selected location: {location}")
-        
-        # Show progress dialog
-        progress = ProgressDialog("Loading weather")
-        
-        # Calculate dialog size
-        screen = urwid.raw_display.Screen()
-        screen_cols, screen_rows = screen.get_cols_rows()
-        dialog_width = int(screen_cols * 0.3)
-        dialog_height = int(screen_rows * 0.2)
-        
-        # Create overlay for progress dialog
-        overlay = urwid.Overlay(
-            progress,
-            self.app.frame,  # Use main frame as bottom widget
-            'center', dialog_width,
-            'middle', dialog_height
-        )
-        
-        # Set the overlay as the active widget and start animation
-        self.app.loop.widget = overlay
-        progress.start_animation(self.app.loop)
-        
-        # Schedule the actual update to happen after the dialog is shown
-        def do_update(loop, user_data):
-            try:
-                # Update parent dialog with selected location
-                if self.parent_dialog.zip_type.state:
-                    pass  # Don't modify the ZIP code field
-                else:
-                    name_parts = [location['name']]
-                    if location.get('state'):
-                        name_parts.append(location['state'])
-                    self.parent_dialog.location_edit.set_edit_text(', '.join(name_parts))
-                
-                # Update country
-                self.parent_dialog.country_edit.set_edit_text(location['country'])
-                
-            finally:
-                # Stop animation and return to settings dialog
-                progress.stop_animation(loop)
-                self.app.loop.widget = self.app.settings_overlay
-        
-        # Schedule the update
-        self.app.loop.set_alarm_in(0.1, do_update)
-
-    def _on_cancel(self, button):
-        # Return to settings dialog
-        self.app.loop.widget = self.app.settings_overlay
-
-class WeatherIcons:
-    """Weather icon mappings using Unicode symbols"""
-    ICONS = {
-        # Clear
-        "01d": "☀️",  # clear sky (day)
-        "01n": "🌙",  # clear sky (night)
-        
-        # Few clouds
-        "02d": "⛅",  # few clouds (day)
-        "02n": "☁️",  # few clouds (night)
-        
-        # Scattered/Broken clouds
-        "03d": "☁️",  # scattered clouds
-        "03n": "☁️",
-        "04d": "☁️",  # broken clouds
-        "04n": "☁️",
-        
-        # Rain
-        "09d": "🌧️",  # shower rain
-        "09n": "🌧️",
-        "10d": "🌦️",  # rain (day)
-        "10n": "🌧️",  # rain (night)
-        
-        # Thunderstorm
-        "11d": "⛈️",  # thunderstorm
-        "11n": "⛈️",
-        
-        # Snow
-        "13d": "🌨️",  # snow
-        "13n": "🌨️",
-        
-        # Mist/Fog
-        "50d": "🌫️",  # mist
-        "50n": "🌫️",
-    }
-    
-    # Fallback ASCII versions if Unicode doesn't render well
-    ASCII_ICONS = {
-        # Clear
-        "01d": "(*)",  # clear sky (day)
-        "01n": "[ ]",  # clear sky (night)
-        
-        # Few clouds
-        "02d": "(_)",  # few clouds (day)
-        "02n": "[-]",  # few clouds (night)
-        
-        # Scattered/Broken clouds
-        "03d": "(__)",  # scattered clouds
-        "03n": "(__)",
-        "04d": "(@@)",  # broken clouds
-        "04n": "(@@)",
-        
-        # Rain
-        "09d": "|||",  # shower rain
-        "09n": "|||",
-        "10d": ".|.",  # rain
-        "10n": ".|.",
-        
-        # Thunderstorm
-        "11d": "/V\\",  # thunderstorm
-        "11n": "/V\\",
-        
-        # Snow
-        "13d": "***",  # snow
-        "13n": "***",
-        
-        # Mist/Fog
-        "50d": "===",  # mist
-        "50n": "===",
-    }
-    
-    @classmethod
-    def get(cls, icon_code: str, use_ascii: bool = False) -> str:
-        """Get weather icon for the given weather code"""
-        if use_ascii:
-            return cls.ASCII_ICONS.get(icon_code, "???")
-        return cls.ICONS.get(icon_code, "?")
-
-class LargeWeatherIcons:
-    """Large ASCII art weather icons for current conditions"""
-    ICONS = {
-        # Clear sky (day)
-        "01d": [
-            ('sun_ray', """\
-    \\   |   /
-     \\  |  /"""),
-            ('sun', """
-   ----█☀█----"""),
-            ('sun_ray', """
-     /  |  \\
-    /   |   \\""")
-        ],
-        # Clear sky (night)
-        "01n": [
-            ('star', "    *  *   *"),
-            ('star', "\n  *    "),
-            ('moon', "█🌙█"),
-            ('star', """   *
-     *    *
-  *     *   *
-    *  *   *""")
-        ],
-        # Few clouds
-        "02d": [
-            ('sun_ray', "   \\  "),
-            ('cloud_outline', "___"),
-            ('sun_ray', "   /"),
-            ('cloud', """
-    _(███)_
-   (█████)"""),
-            ('sun', "\n    \\☀/")
-        ],
-        # Few clouds (night)
-        "02n": [
-            ('cloud_outline', "   ___  "),
-            ('star', "*"),
-            ('cloud', """
-  (███)_  """),
-            ('star', "*"),
-            ('cloud', """
- (█████)
-   * """),
-            ('moon', "🌙"),
-            ('star', " *")
-        ],
-        # Scattered clouds
-        "03d": [
-            ('cloud_outline', "   ___  "),
-            ('cloud', """
-  (███)
- (█████)
-     """)
-        ],
-        # Broken/overcast clouds
-        "04d": [
-            ('cloud_outline', "  ___   ___"),
-            ('cloud', """
-  (███)_(███)
-(█████████)
-       """)
-        ],
-        # Shower rain
-        "09d": [
-            ('cloud_outline', "   ____"),
-            ('cloud', """
-  (████)
- (██████)"""),
-            ('rain', """
-  │╲│╲│╲
-  ││││││""")
-        ],
-        # Rain
-        "10d": [
-            ('sun_ray', " \\  "),
-            ('cloud_outline', "____  "),
-            ('sun_ray', "/"),
-            ('cloud', """
-  _(████)_
- (██████)"""),
-            ('rain', """
-  │╲│╲│╲""")
-        ],
-        # Thunderstorm
-        "11d": [
-            ('cloud_outline', "   ____"),
-            ('cloud', """
-  (████)
- (██████)"""),
-            ('lightning', """
-  │⚡│⚡│"""),
-            ('rain', """
-  ││││││""")
-        ],
-        # Snow
-        "13d": [
-            ('cloud_outline', "   ____"),
-            ('cloud', """
-  (████)
- (██████)"""),
-            ('snow', """
-  *  *  *
-   *  *""")
-        ],
-        # Mist/fog
-        "50d": [
-            ('mist_light', "  ████████"),
-            ('mist_dark', """
- ██████████"""),
-            ('mist_light', """
-  ████████"""),
-            ('mist_dark', """
- ██████████""")
-        ],
-    }
-    
-    # Add aliases for night versions
-    ALIASES = {
-        "03n": "03d",
-        "04n": "04d",
-        "09n": "09d",
-        "10n": "09d",  # Use shower rain at night
-        "11n": "11d",
-        "13n": "13d",
-        "50n": "50d",
-    }
-
-    @classmethod
-    def get(cls, icon_code: str) -> List[tuple]:
-        """Get large weather icon for the given weather code"""
-        logging.debug(f"Getting large icon for code: {icon_code}")
-        
-        # Check aliases first
-        if icon_code in cls.ALIASES:
-            icon_code = cls.ALIASES[icon_code]
-        
-        # Get the icon segments
-        icon = cls.ICONS.get(icon_code)
-        
-        if icon is None:
-            logging.warning(f"No icon found for code: {icon_code}")
-            return [('error', """\
-   ?????
-   ?   ?
-   ?   ?
-   ?????""")]
-        
-        return icon
-
-class RadarDisplay(urwid.Widget):
-    _sizing = frozenset(['box'])
-    
-    def __init__(self, width, height):
-        super().__init__()
-        self.width = width
-        self.height = height
-        self.radar_data = None
-        self.map_data = None
-        self.block_char = '#'
-        self.location_name = None  # Add location name storage
-    
-    def render(self, size, focus=False):
-        maxcol, maxrow = size
-        result = []
-        
-        if self.radar_data is None or self.map_data is None:
-            empty_line = " " * maxcol
-            for i in range(maxrow):
-                result.append(([(None, maxcol)], empty_line.encode('ascii')))
-        else:
-            # Calculate center position for marker
-            center_row = maxrow // 2
-            center_col = maxcol // 2
-            
-            # Resize radar data to fit display area
-            image_radar = Image.fromarray((self.radar_data * 255).astype('uint8'))
-            image_radar = image_radar.resize((maxcol, maxrow))
-            radar_data = np.array(image_radar) / 255.0
-            
-            # Create radar display lines
-            for i in range(maxrow):
-                line = []
-                attrs = []
-                
-                for j in range(maxcol):
-                    val = radar_data[i][j]
-                    
-                    # Draw location marker and name
-                    if i == center_row and j == center_col:
-                        char = '+'  # Center marker
-                        style = 'map_marker'
-                    elif (i == center_row + 1 and 
-                          self.location_name and 
-                          j >= center_col - len(self.location_name)//2 and 
-                          j < center_col + (len(self.location_name)+1)//2):
-                        # Draw location name centered under marker
-                        name_pos = j - (center_col - len(self.location_name)//2)
-                        char = self.location_name[name_pos]
-                        style = 'map_label'
-                    else:
-                        # Show precipitation
-                        char = self.block_char
-                        if val <= 0.0:
-                            style = 'radar_none'
-                        elif val <= 0.2:
-                            style = 'radar_very_light'
-                        elif val <= 0.4:
-                            style = 'radar_light'
-                        elif val <= 0.6:
-                            style = 'radar_moderate'
-                        elif val <= 0.8:
-                            style = 'radar_heavy'
-                        else:
-                            style = 'radar_extreme'
-                    
-                    line.append(char)
-                    attrs.append((style, 1))
-                
-                line_str = ''.join(line)
-                result.append((attrs, line_str.encode('ascii')))
-        
-        return urwid.TextCanvas(
-            [line for _, line in result],
-            attr=[attrs for attrs, _ in result],
-            maxcol=maxcol
-        )
-
-    def update_radar(self, radar_image_data, map_image_data, location_name=None):
-        """Update radar display with new image data"""
-        try:
-            # Process radar data
-            radar_image = Image.open(io.BytesIO(radar_image_data))
-            if radar_image.mode != 'L':
-                radar_image = radar_image.convert('L')
-            radar_data = np.array(radar_image)
-            self.radar_data = np.clip(radar_data / 100.0, 0, 1)
-            
-            # Store location name
-            self.location_name = location_name
-            
-            # Process map data (blank map)
-            map_image = Image.open(io.BytesIO(map_image_data))
-            if map_image.mode != 'L':
-                map_image = map_image.convert('L')
-            self.map_data = np.array(map_image) / 255.0
-            
-            self._invalidate()
-        except Exception as e:
-            logging.error(f"Error updating radar: {str(e)}", exc_info=True)
-
-class RadarContainer(urwid.WidgetWrap):
-    def __init__(self, widget):
-        super().__init__(widget)
-    
-    def render(self, size, focus=False):
-        maxcol, maxrow = size
-        # Make inner size half the width and account for borders
-        inner_size = (maxcol // 2, maxrow)
-        canv = self._w.render(inner_size, focus)
-        
-        # Create a new canvas with the exact size we were given
-        new_canv = urwid.CompositeCanvas(canv)
-        # Calculate padding to center the half-width canvas
-        padding = (maxcol - inner_size[0]) // 2
-        new_canv.pad_trim_left_right(padding, padding)
-        
-        return new_canv
-
-    def sizing(self):
-        return frozenset(['box'])
+# After loading environment variables, add:
+if API_KEY:
+    set_api_key(API_KEY)
+if UNITS:
+    set_units(UNITS)
+if TIME_FORMAT:
+    set_time_format(TIME_FORMAT)
 
 class WeatherApp:
     def __init__(self):
+        self.geo_handler = GeoHandler()
         self.weather_data: Dict = {}
         self.location = "London,UK"  # Default location
         
@@ -1332,67 +467,7 @@ class WeatherApp:
 
     def _get_location_coords(self) -> tuple:
         """Get coordinates for the current location"""
-        try:
-            # Get current location settings from environment
-            zip_code = os.environ.get('DEFAULT_ZIP')
-            country = os.environ.get('DEFAULT_COUNTRY', 'US')
-            
-            if zip_code:
-                # Get location from zip code
-                geo_url = f"http://api.openweathermap.org/geo/1.0/zip"
-                response = requests.get(
-                    geo_url,
-                    params={
-                        "appid": self.api_key,
-                        "zip": f"{zip_code},{country}"
-                    },
-                    timeout=10
-                )
-                response.raise_for_status()
-                location_data = response.json()
-                
-                # Update the location name
-                self.location = f"{location_data['name']}, {location_data['country']}"
-                logging.debug(f"Location set to: {self.location}")
-                
-                return location_data['lat'], location_data['lon']
-            else:
-                # Get location from city name
-                city = os.environ.get('DEFAULT_CITY', '')
-                state = os.environ.get('DEFAULT_STATE', '')
-                
-                search_query = city
-                if state:
-                    search_query += f",{state}"
-                if country:
-                    search_query += f",{country}"
-                    
-                geo_url = "http://api.openweathermap.org/geo/1.0/direct"
-                response = requests.get(
-                    geo_url,
-                    params={
-                        "appid": self.api_key,
-                        "q": search_query,
-                        "limit": 1
-                    },
-                    timeout=10
-                )
-                response.raise_for_status()
-                locations = response.json()
-                
-                if not locations:
-                    raise Exception(f"Location not found: {search_query}")
-                    
-                location_data = locations[0]
-                self.location = f"{location_data['name']}, {location_data.get('state', '')}, {location_data['country']}"
-                logging.debug(f"Location set to: {self.location}")
-                
-                return location_data['lat'], location_data['lon']
-                
-        except Exception as e:
-            logging.error(f"Error getting location coordinates: {str(e)}", exc_info=True)
-            # Default to Monroe, WA coordinates if there's an error
-            return 47.8557, -121.9715
+        return self.geo_handler.get_location_coords()
 
     def update_weather(self) -> None:
         """Fetch and update weather data"""
@@ -1403,42 +478,18 @@ class WeatherApp:
             lat, lon = self._get_location_coords()
             logging.debug(f"Using coordinates: {lat}, {lon}")
             
-            # Get current weather with units parameter
-            current_response = requests.get(
-                f"{BASE_URL}/weather",
-                params={
-                    "appid": API_KEY,
-                    "lat": lat,
-                    "lon": lon,
-                    "units": UNITS
-                },
-                timeout=10
-            )
-            
-            if current_response.status_code == 401:
-                error_msg = ("API key unauthorized. Please make sure you have subscribed to the correct API plan.")
-                logging.error(error_msg)
-                self._show_error(error_msg)
-                return
-            
-            current_response.raise_for_status()
-            
-            # Get 5 day forecast with units parameter
-            forecast_response = requests.get(
-                f"{BASE_URL}/forecast",
-                params={
-                    "appid": API_KEY,
-                    "lat": lat,
-                    "lon": lon,
-                    "units": UNITS
-                },
-                timeout=10
-            )
-            forecast_response.raise_for_status()
-            
+            # Get current weather and forecast
             self.weather_data = {
-                'current': current_response.json(),
-                'forecast': forecast_response.json()
+                'current': make_api_request("/weather", {
+                    "lat": lat,
+                    "lon": lon,
+                    "units": UNITS
+                }),
+                'forecast': make_api_request("/forecast", {
+                    "lat": lat,
+                    "lon": lon,
+                    "units": UNITS
+                })
             }
             
             # Schedule next update in 10 minutes
@@ -1452,9 +503,6 @@ class WeatherApp:
         except requests.RequestException as e:
             logging.error(f"Network error: {str(e)}")
             self._show_error(f"Network error: {str(e)}")
-        except json.JSONDecodeError as e:
-            logging.error(f"Invalid API response: {str(e)}")
-            self._show_error(f"Invalid API response: {str(e)}")
         except Exception as e:
             logging.error(f"Error fetching weather data: {str(e)}", exc_info=True)
             self._show_error(f"Error fetching weather data: {str(e)}")
@@ -1469,9 +517,10 @@ class WeatherApp:
             y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
             
             # Use precipitation layer only since map layers require subscription
-            radar_url = f"https://tile.openweathermap.org/map/precipitation_new/{zoom}/{x}/{y}.png?appid={API_KEY}"
-            radar_response = requests.get(radar_url, timeout=10)
-            radar_response.raise_for_status()
+            radar_data = download_binary(
+                f"/map/precipitation_new/{zoom}/{x}/{y}.png",
+                base_url="https://tile.openweathermap.org"
+            )
             
             # Create a blank base map
             blank_map = np.zeros((256, 256), dtype=np.uint8)  # Standard tile size is 256x256
@@ -1481,9 +530,9 @@ class WeatherApp:
             
             # Update radar display with precipitation layer and blank base map
             self.radar.update_radar(
-                radar_response.content, 
+                radar_data,
                 blank_map_bytes.getvalue(),
-                location_name=self.location  # Pass current location name
+                location_name=self.geo_handler.get_current_location()  # Pass current location name
             )
             
         except Exception as e:
@@ -1538,7 +587,7 @@ class WeatherApp:
             # Update header with location name - Fixed to update the Text widget directly
             header_cols = self.header.original_widget
             header_text = header_cols.contents[0][0]  # Get the Text widget from the Columns
-            header_text.set_text(f"Terminal Weather - {current['name']}, {current['sys']['country']}")
+            header_text.set_text(f"Terminal Weather - {self.geo_handler.get_current_location()}")
             
             # Update hourly forecast
             self._update_hourly_forecast()
