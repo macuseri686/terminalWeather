@@ -46,14 +46,14 @@ UNITS = os.getenv('UNITS', 'metric').lower()  # Default to metric if not set
 TIME_FORMAT = os.getenv('TIME_FORMAT', '24')  # Default to 24-hour if not set
 
 # Add this near the top of the file, after imports
-logging.basicConfig(
-    filename='weather_app.log',
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# logging.basicConfig(
+#     filename='weather_app.log',
+#     level=logging.DEBUG,
+#     format='%(asctime)s - %(levelname)s - %(message)s'
+# )
 
 # Set up a null logger instead
-# logging.getLogger().setLevel(logging.CRITICAL)  # This effectively disables most logging
+logging.getLogger().setLevel(logging.CRITICAL)  # This effectively disables most logging
 
 # After loading environment variables, add:
 if API_KEY:
@@ -82,7 +82,7 @@ class WeatherApp:
         available_height = screen_rows - 1  # -1 for header
         
         # Calculate section heights proportionally
-        current_height = min(10, int(available_height * 0.3))
+        current_height = min(8, int(available_height * 0.3))
         forecast_height = min(9, int(available_height * 0.25))
         radar_height = min(22, available_height - current_height - (forecast_height * 2))
         
