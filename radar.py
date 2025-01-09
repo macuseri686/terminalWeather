@@ -330,8 +330,8 @@ class RadarDisplay(urwid.Widget):
                             'motorway': '#',
                             'trunk': '=',
                             'primary': '-',
-                            'secondary': '.',
-                            'tertiary': ','
+                            'secondary': '-',
+                            'tertiary': '-'
                         }.get(highway_type, '·')
                         style = 'map_road'
                         ways_count['highway'] += 1
@@ -684,6 +684,43 @@ class RadarDisplay(urwid.Widget):
             image_radar = image_radar.resize((scaled_width, scaled_height), Image.Resampling.NEAREST)
             radar_data = np.array(image_radar) / 255.0
             
+            # Create a copy of the road map and style map for modification
+            display_map = np.copy(self.road_map)
+            display_style = np.copy(self.style_map)
+            
+            # First pass: Draw base features and radar, excluding roads and place names
+            for y in range(scaled_height):
+                for x in range(scaled_width):
+                    if (display_style[y, x] == 'map_label' or 
+                        display_style[y, x] == 'map_road'):
+                        # Skip roads and place names in first pass
+                        continue
+                    
+                    # Apply radar data if present
+                    val = radar_data[y, x]
+                    if val > 0.01:
+                        display_style[y, x] = 'radar_' + (
+                            'very_light' if val <= 0.05 else
+                            'light' if val <= 0.1 else
+                            'moderate' if val <= 0.2 else
+                            'heavy' if val <= 0.4 else
+                            'extreme'
+                        )
+            
+            # Second pass: Draw roads on top of radar
+            for y in range(scaled_height):
+                for x in range(scaled_width):
+                    if self.style_map[y, x] == 'map_road':
+                        display_map[y, x] = self.road_map[y, x]
+                        display_style[y, x] = 'map_road'
+            
+            # Third pass: Draw place names on top of everything
+            for y in range(scaled_height):
+                for x in range(scaled_width):
+                    if self.style_map[y, x] == 'map_label':
+                        display_map[y, x] = self.road_map[y, x]
+                        display_style[y, x] = 'map_label'
+            
             # Create display lines
             for i in range(maxrow):
                 line = []
@@ -694,24 +731,8 @@ class RadarDisplay(urwid.Widget):
                     map_x = j - h_offset
                     
                     if 0 <= map_y < scaled_height and 0 <= map_x < scaled_width:
-                        val = radar_data[map_y, map_x]
-                        map_char = self.road_map[map_y, map_x]
-                        map_style = self.style_map[map_y, map_x]
-                        
-                        # First, determine precipitation level if any
-                        if val > 0.01:
-                            style = 'radar_' + (
-                                'very_light' if val <= 0.05 else
-                                'light' if val <= 0.1 else
-                                'moderate' if val <= 0.2 else
-                                'heavy' if val <= 0.4 else
-                                'extreme'
-                            )
-                        else:
-                            # Use the map style if no precipitation
-                            style = map_style
-                        
-                        # Add the character and its style
+                        map_char = display_map[map_y, map_x]
+                        style = display_style[map_y, map_x]
                         attrs.append((style, 1))
                         line.append(map_char)
                     else:
