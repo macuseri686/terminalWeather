@@ -294,11 +294,11 @@ class RadarDisplay(urwid.Widget):
                 # Determine style based on tags
                 if element['tags'].get('landuse') in ['residential', 'commercial', 'industrial']:
                     style = 'map_urban'
-                    char = 'U'  # Changed from '░' to '█' for urban areas
+                    char = 'O'  # Changed from '░' to '█' for urban areas
                 elif (element['tags'].get('leisure') in ['park', 'garden', 'nature_reserve'] or
                       element['tags'].get('natural') in ['wood', 'forest']):
                     style = 'map_nature'
-                    char = 'F'  # Changed from '♠' to '↟' for natural areas
+                    char = '^'
                 
                 if style:
                     coords = self._get_element_coords(element, nodes, ways)
