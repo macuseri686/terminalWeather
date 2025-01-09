@@ -2,7 +2,7 @@
 
 A terminal-based weather application with an interactive UI, built using Python and urwid. Get current conditions, hourly forecasts, daily forecasts, and weather radar - all in your terminal!
 
-![Screenshot from 2025-01-07 20-07-00](https://github.com/user-attachments/assets/a04e2c5c-005a-4041-b77b-e1fc813614cf)
+![Screenshot from 2025-01-08 15-01-02](https://github.com/user-attachments/assets/cc694817-5962-4560-9e2a-d46641b33289)
 
 ## Features
 
