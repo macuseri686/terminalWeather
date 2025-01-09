@@ -337,8 +337,27 @@ class RadarDisplay(urwid.Widget):
                         ways_count['highway'] += 1
                     
                     if char and style:
-                        self._draw_line_feature(char_map, style_map, coords, char, style,
-                                              center_lat, center_lon, width, height)
+                        # Draw each segment with its geographic coordinates
+                        for i in range(len(coords) - 1):
+                            start = coords[i]
+                            end = coords[i + 1]
+                            
+                            # Project coordinates to screen space
+                            start_proj = self._project_coords(start[0], start[1], 
+                                                            center_lat, center_lon, 
+                                                            width, height)
+                            end_proj = self._project_coords(end[0], end[1], 
+                                                          center_lat, center_lon, 
+                                                          width, height)
+                            
+                            if start_proj and end_proj:
+                                x1, y1 = start_proj
+                                x2, y2 = end_proj
+                                # Pass the original geographic coordinates
+                                geo_coords = (start[0], start[1], end[0], end[1])
+                                self._draw_line_segment(char_map, style_map, 
+                                                  x1, y1, x2, y2, char, style,
+                                                  geo_coords=geo_coords)
 
         # Finally, draw place labels on top of everything
         for element in places:
@@ -560,9 +579,21 @@ class RadarDisplay(urwid.Widget):
                     style_map[y+1, start_x:end_x] = style
 
     def _draw_line_segment(self, char_map: np.ndarray, style_map: np.ndarray, 
-                          x1: int, y1: int, x2: int, y2: int, char: str, style: str):
+                          x1: int, y1: int, x2: int, y2: int, char: str, style: str,
+                          geo_coords: tuple = None):
         """Draw a line segment using Bresenham's algorithm with proper clipping"""
         height, width = char_map.shape
+        
+        # Determine if the line is vertical based on geographic coordinates if available
+        line_char = char
+        if geo_coords:
+            lat1, lon1, lat2, lon2 = geo_coords
+            # Compare longitude difference vs latitude difference to determine if vertical
+            # Use a threshold to account for projection distortion
+            d_lon = abs(lon2 - lon1)
+            d_lat = abs(lat2 - lat1)
+            is_vertical = d_lon < (d_lat * 0.7)  # Use 0.7 as threshold to favor vertical lines
+            line_char = '|' if is_vertical else char
         
         # Cohen-Sutherland line clipping
         def compute_code(x, y):
@@ -613,6 +644,10 @@ class RadarDisplay(urwid.Widget):
         dy = abs(y2 - y1)
         steep = dy > dx
         
+        # Store original coordinates for direction check
+        orig_x1, orig_y1 = x1, y1
+        orig_x2, orig_y2 = x2, y2
+        
         if steep:
             x1, y1 = y1, x1
             x2, y2 = y2, x2
@@ -630,11 +665,12 @@ class RadarDisplay(urwid.Widget):
         for x in range(x1, x2 + 1):
             if steep:
                 if 0 <= y < width and 0 <= x < height:  # Only draw if in bounds
-                    char_map[x, y] = char
+                    # Use original coordinates to determine character
+                    char_map[x, y] = line_char
                     style_map[x, y] = style
             else:
                 if 0 <= x < width and 0 <= y < height:  # Only draw if in bounds
-                    char_map[y, x] = char
+                    char_map[y, x] = line_char
                     style_map[y, x] = style
             error -= dy
             if error < 0:

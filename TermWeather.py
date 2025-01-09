@@ -46,14 +46,14 @@ UNITS = os.getenv('UNITS', 'metric').lower()  # Default to metric if not set
 TIME_FORMAT = os.getenv('TIME_FORMAT', '24')  # Default to 24-hour if not set
 
 # Add this near the top of the file, after imports
-# logging.basicConfig(
-#     filename='weather_app.log',
-#     level=logging.DEBUG,
-#     format='%(asctime)s - %(levelname)s - %(message)s'
-# )
+logging.basicConfig(
+    filename='weather_app.log',
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # Set up a null logger instead
-logging.getLogger().setLevel(logging.CRITICAL)  # This effectively disables most logging
+# logging.getLogger().setLevel(logging.CRITICAL)  # This effectively disables most logging
 
 # After loading environment variables, add:
 if API_KEY:
@@ -147,7 +147,6 @@ class WeatherApp:
             ('radar_extreme', 'dark red', 'dark red'),
             ('radar_default', 'black', 'black'),
             ('map_background', 'dark gray', 'dark gray'),
-            ('map_road', 'white', 'dark gray'),
             ('map_label', 'yellow,bold', 'black'),
             ('map_marker', 'white,bold', 'black'),
             ('button', 'black', 'light gray'),  # Added button style
@@ -170,7 +169,6 @@ class WeatherApp:
             ('dialog', 'black', 'white'),  # Add this as well
             ('map_water', 'light blue', 'dark blue'),  # Water features
             ('map_water_fill', 'dark blue', 'dark blue'),  # Water body fill
-            ('map_road', 'black', 'light gray'),  # Roads with gray background
             ('map_road_highway', 'white,bold', 'dark gray'),  # Highways
             ('map_road_major', 'white', 'dark gray'),         # Trunk roads
             ('map_road_primary', 'light gray', 'dark gray'),  # Primary roads
@@ -179,7 +177,7 @@ class WeatherApp:
             ('map_road', 'dark gray', 'light gray'),  # Default road style
             ('map_ocean', 'light blue', 'dark blue'),  # Ocean areas
             ('map_urban', 'dark gray', 'default'),  # Add this for urban areas
-            ('map_nature', 'dark green', 'default'),  # Add this for parks/forests
+            ('map_nature', 'dark green', 'dark gray'),  # Parks and forests with matching background
             ('map_land', 'light gray', 'default'),  # Land areas - use default background instead of light gray
         ]
 
