@@ -45,15 +45,19 @@ DEFAULT_COUNTRY = os.getenv('DEFAULT_COUNTRY', 'US')  # Default to US if not set
 UNITS = os.getenv('UNITS', 'metric').lower()  # Default to metric if not set
 TIME_FORMAT = os.getenv('TIME_FORMAT', '24')  # Default to 24-hour if not set
 
-# Add this near the top of the file, after imports
-# logging.basicConfig(
-#     filename='weather_app.log',
-#     level=logging.DEBUG,
-#     format='%(asctime)s - %(levelname)s - %(message)s'
-# )
+# Configure root logger
+logging.basicConfig(
+    filename='weather_app.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
-# Set up a null logger instead
-logging.getLogger().setLevel(logging.CRITICAL)  # This effectively disables most logging
+# Create a logger specifically for our application
+app_logger = logging.getLogger('TermWeather')
+app_logger.setLevel(logging.DEBUG)  # Keep debug level for our app
+
+# Suppress urwid's debug messages
+logging.getLogger('urwid').setLevel(logging.WARNING)
 
 # After loading environment variables, add:
 if API_KEY:
@@ -177,7 +181,7 @@ class WeatherApp:
             ('map_road', 'dark gray', 'light gray'),  # Default road style
             ('map_ocean', 'light blue', 'dark blue'),  # Ocean areas
             ('map_urban', 'dark gray', 'default'),  # Add this for urban areas
-            ('map_nature', 'dark green', 'dark gray'),  # Parks and forests with matching background
+            ('map_nature', 'dark green,bold', 'dark gray'),  # Parks and forests with matching background
             ('map_land', 'light gray', 'default'),  # Land areas - use default background instead of light gray
         ]
 
@@ -478,11 +482,32 @@ class WeatherApp:
         self.radar = RadarDisplay(screen_width - 2, height - 2)  # -2 for borders
         logging.debug(f"Created radar display with size: {screen_width-2}x{height-2}")
         
-        # Create a fixed-size box for the radar
-        radar_box = urwid.BoxAdapter(
+        # Create zoom buttons
+        zoom_in_btn = urwid.Button("+", on_press=self._zoom_in)
+        zoom_out_btn = urwid.Button("-", on_press=self._zoom_out)
+        zoom_in_btn = urwid.AttrMap(zoom_in_btn, 'button', 'button_focus')
+        zoom_out_btn = urwid.AttrMap(zoom_out_btn, 'button', 'button_focus')
+        
+        # Stack zoom buttons vertically
+        zoom_controls = urwid.Pile([
+            ('pack', zoom_in_btn),
+            ('pack', zoom_out_btn)
+        ])
+        
+        # Create overlay for zoom controls
+        zoom_overlay = urwid.Overlay(
+            zoom_controls,
             self.radar,
+            'left', 4,  # width of 4 characters
+            'top', 4    # height of 4 rows
+        )
+        
+        # Create a fixed-size box for the radar with zoom controls
+        radar_box = urwid.BoxAdapter(
+            zoom_overlay,
             height - 2  # Match the height we want, accounting for borders
         )
+        
         return urwid.AttrMap(urwid.LineBox(
             radar_box,
             title="Weather Radar"
@@ -495,11 +520,11 @@ class WeatherApp:
     def update_weather(self) -> None:
         """Fetch and update weather data"""
         try:
-            logging.debug("Starting weather update")
+            app_logger.debug("Starting weather update")
             
             # Get coordinates for the location
             lat, lon = self._get_location_coords()
-            logging.debug(f"Using coordinates: {lat}, {lon}")
+            app_logger.debug(f"Using coordinates: {lat}, {lon}")
             
             # Get current weather and forecast
             self.weather_data = {
@@ -533,7 +558,7 @@ class WeatherApp:
     def _update_radar(self, lat: float, lon: float) -> None:
         """Update the radar display"""
         try:
-            zoom = 11  # Changed from 12 to 11 to zoom out
+            zoom = self.radar.zoom
             lat_rad = math.radians(lat)
             n = 2.0 ** zoom
             
@@ -541,7 +566,17 @@ class WeatherApp:
             xtile = int((lon + 180.0) / 360.0 * n)
             ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
             
-            # Calculate tile bounds using Mercator projection formulas
+            # Calculate how many tiles we need based on zoom level
+            # At lower zoom levels, we need more tiles to cover the same area
+            tiles_needed = max(1, int(2 ** (11 - zoom)))  # Base coverage at zoom 11
+            
+            # Calculate tile range
+            x_start = max(0, xtile - tiles_needed//2)
+            x_end = min(int(n), xtile + tiles_needed//2 + 1)
+            y_start = max(0, ytile - tiles_needed//2)
+            y_end = min(int(n), ytile + tiles_needed//2 + 1)
+            
+            # Calculate bounds for the entire area
             def lat_from_y(y, n_tiles):
                 n = math.pi - 2.0 * math.pi * y / n_tiles
                 return math.degrees(math.atan(math.sinh(n)))
@@ -549,26 +584,46 @@ class WeatherApp:
             def lon_from_x(x, n_tiles):
                 return x * 360.0 / n_tiles - 180.0
             
-            # Calculate bounds
-            lat1 = lat_from_y(ytile, n)  # North latitude
-            lat2 = lat_from_y(ytile + 1, n)  # South latitude
-            lon1 = lon_from_x(xtile, n)  # West longitude
-            lon2 = lon_from_x(xtile + 1, n)  # East longitude
+            # Get bounds for entire area
+            lat1 = lat_from_y(y_start, n)      # North latitude
+            lat2 = lat_from_y(y_end, n)        # South latitude
+            lon1 = lon_from_x(x_start, n)      # West longitude
+            lon2 = lon_from_x(x_end, n)        # East longitude
             
-            logging.debug(f"Tile bounds: N={lat1:.4f}, S={lat2:.4f}, W={lon1:.4f}, E={lon2:.4f}")
+            app_logger.debug(f"Fetching tiles: x={x_start}-{x_end}, y={y_start}-{y_end}")
             
-            # Re-enable radar data fetching
-            radar_data = download_binary(
-                f"/map/precipitation_new/{zoom}/{xtile}/{ytile}.png",
-                base_url="https://tile.openweathermap.org"
-            )
+            # Create a combined radar image
+            combined_width = (x_end - x_start) * 256  # OpenWeatherMap tiles are 256x256
+            combined_height = (y_end - y_start) * 256
+            combined_radar = Image.new('RGBA', (combined_width, combined_height))
+            
+            # Fetch and combine radar tiles
+            for y in range(y_start, y_end):
+                for x in range(x_start, x_end):
+                    try:
+                        radar_data = download_binary(
+                            f"/map/precipitation_new/{zoom}/{x}/{y}.png",
+                            base_url="https://tile.openweathermap.org"
+                        )
+                        if radar_data:
+                            tile_img = Image.open(io.BytesIO(radar_data))
+                            combined_radar.paste(tile_img, 
+                                              ((x - x_start) * 256, 
+                                               (y - y_start) * 256))
+                    except Exception as e:
+                        app_logger.error(f"Error fetching radar tile {x},{y}: {str(e)}")
             
             # Get map features from Overpass API
             overpass_data = self.radar._fetch_overpass_data(lat, lon)
             
+            # Update radar display with combined radar data
+            combined_radar_bytes = io.BytesIO()
+            combined_radar.save(combined_radar_bytes, format='PNG')
+            combined_radar_bytes = combined_radar_bytes.getvalue()
+            
             # Update radar display
             self.radar.update_radar(
-                radar_data,
+                combined_radar_bytes,
                 overpass_data,
                 location_name=self.geo_handler.get_current_location(),
                 center_lat=lat,
@@ -577,21 +632,21 @@ class WeatherApp:
             )
             
         except Exception as e:
-            logging.error(f"Error fetching radar data: {str(e)}", exc_info=True)
+            app_logger.error(f"Error fetching radar data: {str(e)}", exc_info=True)
 
     def _update_display(self) -> None:
         """Update all display widgets with new weather data"""
         try:
-            logging.debug("Starting display update")
+            app_logger.debug("Starting display update")
             current = self.weather_data['current']
             
             # Add debug logging for icon code
             icon_code = current['weather'][0]['icon']
-            logging.debug(f"Weather icon code: {icon_code}")
+            app_logger.debug(f"Weather icon code: {icon_code}")
             
             # Get the icon and log it
             icon_segments = LargeWeatherIcons.get(icon_code)
-            logging.debug(f"Generated colored ASCII art segments: {icon_segments}")
+            app_logger.debug(f"Generated colored ASCII art segments: {icon_segments}")
             
             # Update weather icon with colored ASCII art
             self.current_large_icon.set_text(icon_segments)
@@ -707,7 +762,7 @@ class WeatherApp:
 
     def _first_update(self, loop, user_data):
         """Initial weather update after UI starts"""
-        logging.debug("Starting first update")
+        app_logger.debug("Starting first update")
         try:
             self.update_weather()
         finally:
@@ -767,6 +822,30 @@ class WeatherApp:
         """Update location settings from environment variables"""
         # Reinitialize the geo_handler to pick up new settings
         self.geo_handler = GeoHandler()
+
+    def _zoom_in(self, button):
+        """Handle zoom in button press"""
+        if hasattr(self.radar, 'zoom'):
+            current_zoom = self.radar.zoom
+            if current_zoom < 13:  # Maximum zoom level
+                self.radar.zoom = current_zoom + 1
+                self._update_radar_with_zoom()
+
+    def _zoom_out(self, button):
+        """Handle zoom out button press"""
+        if hasattr(self.radar, 'zoom'):
+            current_zoom = self.radar.zoom
+            if current_zoom > 8:  # Minimum zoom level
+                self.radar.zoom = current_zoom - 1
+                self._update_radar_with_zoom()
+
+    def _update_radar_with_zoom(self):
+        """Update radar display with new zoom level"""
+        try:
+            lat, lon = self._get_location_coords()
+            self._update_radar(lat, lon)
+        except Exception as e:
+            logging.error(f"Error updating radar zoom: {str(e)}")
 
 def main():
     if not API_KEY:

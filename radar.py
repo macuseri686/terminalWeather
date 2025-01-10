@@ -11,6 +11,9 @@ import os
 from datetime import datetime, timedelta
 import sys
 
+# Create a logger specifically for radar
+radar_logger = logging.getLogger('TermWeather.radar')
+
 class RadarDisplay(urwid.Widget):
     _sizing = frozenset(['box'])
     
@@ -45,13 +48,16 @@ class RadarDisplay(urwid.Widget):
         self.location_name = None
         self.road_map = None
         self.style_map = None
+        self.zoom = 11  # Add default zoom level
         self.cache_dir = os.path.expanduser("~/.cache/terminalweather")
         os.makedirs(self.cache_dir, exist_ok=True)
-        logging.debug(f"RadarDisplay initialized with size: {width}x{height}")
+        radar_logger.debug(f"RadarDisplay initialized with size: {width}x{height}")
 
     def _get_cache_path(self, lat: float, lon: float, radius: float) -> str:
         """Get path for cached Overpass data"""
-        return os.path.join(self.cache_dir, f"overpass_{lat:.4f}_{lon:.4f}_{radius}.json")
+        # Include zoom level in the cache key
+        return os.path.join(self.cache_dir, 
+                           f"overpass_{lat:.4f}_{lon:.4f}_{radius}_{self.zoom}.json")
 
     def _is_cache_valid(self, cache_path: str, max_age_hours: int = 24) -> bool:
         """Check if cached data is still valid"""
@@ -62,8 +68,27 @@ class RadarDisplay(urwid.Widget):
         age = datetime.now() - mtime
         return age < timedelta(hours=max_age_hours)
 
-    def _fetch_overpass_data(self, lat: float, lon: float, radius: float = 5000) -> Optional[Dict]:
+    def _fetch_overpass_data(self, lat: float, lon: float, radius: float = None) -> Optional[Dict]:
         """Fetch map data from Overpass API with caching"""
+        # Calculate radius based on zoom level
+        if radius is None:
+            base_radius = 5000
+            zoom_diff = 11 - self.zoom
+            radius = base_radius * (2 ** zoom_diff)
+            radar_logger.debug(f"Using radius {radius}m for zoom level {self.zoom}")
+        
+        # Adjust road types based on zoom level
+        road_filter = ""
+        if self.zoom >= 11:
+            # Show all road types at high zoom levels
+            road_filter = '"highway"~"^(motorway|trunk|primary|secondary|tertiary)$"'
+        elif self.zoom >= 10:
+            # Show only major roads
+            road_filter = '"highway"~"^(motorway|trunk|primary)$"'
+        else:
+            # Show only highways at low zoom levels
+            road_filter = '"highway"~"^(motorway|trunk)$"'
+        
         cache_path = self._get_cache_path(lat, lon, radius)
         
         # Try to use cached data
@@ -71,17 +96,17 @@ class RadarDisplay(urwid.Widget):
             try:
                 with open(cache_path, 'r') as f:
                     data = json.load(f)
-                logging.debug(f"Using cached Overpass data from {cache_path}")
+                radar_logger.debug(f"Using cached Overpass data from {cache_path}")
                 return data
             except Exception as e:
-                logging.error(f"Error reading cache: {str(e)}")
+                radar_logger.error(f"Error reading cache: {str(e)}")
         
         # Fetch new data if cache is invalid or missing
         try:
             query = f"""
                 [out:json][timeout:25];
                 (
-                  way["highway"~"^(motorway|trunk|primary|secondary|tertiary)$"]
+                  way[{road_filter}]
                     (around:{radius},{lat},{lon});
                   way["natural"="water"]["water"="bay"]
                     (around:{radius},{lat},{lon});
@@ -133,7 +158,7 @@ class RadarDisplay(urwid.Widget):
                 out skel qt;
             """
             
-            logging.debug(f"Fetching Overpass data for: {lat}, {lon}, radius: {radius}m")
+            radar_logger.debug(f"Fetching Overpass data for: {lat}, {lon}, radius: {radius}m")
             url = "https://overpass-api.de/api/interpreter"
             headers = {'User-Agent': 'TerminalWeather/1.0'}
             response = requests.post(url, data={'data': query}, headers=headers, timeout=25)
@@ -145,19 +170,19 @@ class RadarDisplay(urwid.Widget):
             for element in data.get('elements', []):
                 element_type = element['type']
                 element_types[element_type] = element_types.get(element_type, 0) + 1
-            logging.debug(f"Received elements by type: {element_types}")
+            radar_logger.debug(f"Received elements by type: {element_types}")
             
             # Cache the response
             try:
                 with open(cache_path, 'w') as f:
                     json.dump(data, f)
-                logging.debug(f"Cached Overpass data to {cache_path}")
+                radar_logger.debug(f"Cached Overpass data to {cache_path}")
             except Exception as e:
-                logging.error(f"Error caching data: {str(e)}")
+                radar_logger.error(f"Error caching data: {str(e)}")
             
             return data
         except Exception as e:
-            logging.error(f"Failed to fetch Overpass data: {str(e)}")
+            radar_logger.error(f"Failed to fetch Overpass data: {str(e)}")
             return None
 
     def _process_overpass_features(self, data: Dict, width: int, height: int, 
@@ -166,19 +191,19 @@ class RadarDisplay(urwid.Widget):
                                  degrees_per_pixel_lon: float = None,
                                  tile_bounds: tuple = None) -> tuple:
         """Process Overpass API data and create ASCII map and style map"""
-        logging.debug(f"Processing features for map size: {width}x{height}")
+        radar_logger.debug(f"Processing features for map size: {width}x{height}")
         
         # Debug the data we received
         water_features = [e for e in data['elements'] if e['type'] in ['way', 'relation'] 
                          and 'tags' in e and ('natural' in e['tags'] or 'water' in e['tags'] 
                          or 'place' in e['tags'])]
-        logging.debug(f"Found water features: {[f['tags'].get('name', 'unnamed') + ': ' + str(f['tags']) for f in water_features]}")
+        radar_logger.debug(f"Found water features: {[f['tags'].get('name', 'unnamed') + ': ' + str(f['tags']) for f in water_features]}")
         
         char_map = np.full((height, width), ' ', dtype='U1')
         style_map = np.full((height, width), 'map_background', dtype=object)
 
         if not data or 'elements' not in data:
-            logging.warning("No elements found in Overpass data")
+            radar_logger.warning("No elements found in Overpass data")
             return char_map, style_map
 
         # Initialize counters and lookups
@@ -210,7 +235,7 @@ class RadarDisplay(urwid.Widget):
                     tags.get('water') in ['lake', 'river', 'reservoir']):
                     
                     name = tags.get('name', 'unnamed')
-                    logging.debug(f"Processing water body: {name} ({tags})")
+                    # radar_logger.debug(f"Processing water body: {name} ({tags})")
                     
                     coords = self._get_element_coords(element, nodes, ways)
                     if coords:
@@ -234,7 +259,7 @@ class RadarDisplay(urwid.Widget):
                                         style_map[y, x] = 'map_water_fill'
                                         fill_count += 1
                             
-                            logging.debug(f"Filled {fill_count} pixels for {name} (water)")
+                            # radar_logger.debug(f"Filled {fill_count} pixels for {name} (water)")
 
         # Second pass: Process land features to cut out from water
         for element in data['elements']:
@@ -247,7 +272,7 @@ class RadarDisplay(urwid.Widget):
                     tags.get('landuse') in ['residential', 'commercial', 'industrial']):
                     
                     name = tags.get('name', 'unnamed')
-                    logging.debug(f"Processing land feature: {name} ({tags})")
+                    # radar_logger.debug(f"Processing land feature: {name} ({tags})")
                     
                     coords = self._get_element_coords(element, nodes, ways)
                     if coords:
@@ -271,7 +296,7 @@ class RadarDisplay(urwid.Widget):
                                         style_map[y, x] = 'map_land'
                                         fill_count += 1
                             
-                            logging.debug(f"Cut out {fill_count} pixels for {name} (land)")
+                            # radar_logger.debug(f"Cut out {fill_count} pixels for {name} (land)")
 
         # Third pass: Draw rivers as lines only, no filling
         for element in data['elements']:
@@ -326,15 +351,31 @@ class RadarDisplay(urwid.Widget):
                         ways_count['waterway'] += 1
                     elif element['tags'].get('highway'):
                         highway_type = element['tags']['highway']
-                        char = {
-                            'motorway': '#',
-                            'trunk': '=',
-                            'primary': '-',
-                            'secondary': '-',
-                            'tertiary': '-'
-                        }.get(highway_type, '·')
-                        style = 'map_road'
-                        ways_count['highway'] += 1
+                        
+                        # Adjust road rendering based on zoom level
+                        if self.zoom >= 11:
+                            char = {
+                                'motorway': '#',
+                                'trunk': '=',
+                                'primary': '-',
+                                'secondary': '-',
+                                'tertiary': '-'
+                            }.get(highway_type)
+                        elif self.zoom >= 10:
+                            char = {
+                                'motorway': '#',
+                                'trunk': '=',
+                                'primary': '-'
+                            }.get(highway_type)
+                        else:
+                            char = {
+                                'motorway': '#',
+                                'trunk': '='
+                            }.get(highway_type)
+                        
+                        if char:  # Only process if we want to show this road type
+                            style = 'map_road'
+                            ways_count['highway'] += 1
                     
                     if char and style:
                         # Draw each segment with its geographic coordinates
@@ -362,45 +403,62 @@ class RadarDisplay(urwid.Widget):
         # Finally, draw place labels on top of everything
         for element in places:
             name = element['tags'].get('name', '')
+            place_type = element['tags'].get('place')
             if name:
-                places_count += 1
-                projected = self._project_coords(
-                    element['lat'], 
-                    element['lon'], 
-                    center_lat, 
-                    center_lon, 
-                    width, 
-                    height,
-                    degrees_per_pixel_lat,
-                    degrees_per_pixel_lon,
-                    tile_bounds
-                )
+                # Adjust place visibility based on zoom level
+                should_show = False
+                if self.zoom >= 11:
+                    # Show all places at high zoom
+                    should_show = True
+                elif self.zoom >= 10:
+                    # Show cities and large towns
+                    should_show = place_type in ['city', 'town']
+                elif self.zoom >= 7:
+                    # Show only cities
+                    should_show = place_type == 'city'
+                elif self.zoom >= 6:
+                    # Show only major cities
+                    should_show = (place_type == 'city' and 
+                                 int(element['tags'].get('population', '0')) >= 100000)
                 
-                if projected is not None:  # Only process if projection is valid
-                    x, y = projected
-                    logging.debug(f"Processing place label '{name}' at coordinates ({x}, {y})")
-                    logging.debug(f"Map dimensions: {char_map.shape}")
+                if should_show:
+                    places_count += 1
+                    projected = self._project_coords(
+                        element['lat'], 
+                        element['lon'], 
+                        center_lat, 
+                        center_lon, 
+                        width, 
+                        height,
+                        tile_bounds=tile_bounds
+                    )
                     
-                    # Draw text centered at coordinates
-                    text_start_x = max(0, x - len(name)//2)
-                    text_end_x = min(width, text_start_x + len(name))
-                    logging.debug(f"Label span: {text_start_x} to {text_end_x} at y={y}")
-                    
-                    for i, char in enumerate(name):
-                        pos_x = text_start_x + i
-                        if 0 <= pos_x < width and 0 <= y < height:
-                            try:
-                                char_map[y, pos_x] = char
-                                style_map[y, pos_x] = 'map_label'
-                                logging.debug(f"Placed character '{char}' at ({pos_x}, {y})")
-                            except IndexError:
-                                logging.error(f"Failed to place character at ({pos_x}, {y}). Array shape: {char_map.shape}")
+                    if projected is not None:
+                        x, y = projected
+                        # Check if the projected point is within the visible area
+                        if 0 <= x < width and 0 <= y < height:
+                            radar_logger.debug(f"Processing place label '{name}' at ({x}, {y})")
+                            
+                            # Draw text centered at coordinates
+                            text_start_x = max(0, x - len(name)//2)
+                            text_end_x = min(width, text_start_x + len(name))
+                            
+                            # Only draw if we have room for at least part of the name
+                            if text_start_x < width and text_end_x > 0:
+                                for i, char in enumerate(name):
+                                    pos_x = text_start_x + i
+                                    if 0 <= pos_x < width and 0 <= y < height:
+                                        try:
+                                            char_map[y, pos_x] = char
+                                            style_map[y, pos_x] = 'map_label'
+                                        except IndexError:
+                                            radar_logger.error(f"Failed to place character at ({pos_x}, {y})")
 
         # After processing
         label_count = np.sum(style_map == 'map_label')
-        logging.debug(f"Total label characters placed in map: {label_count}")
+        radar_logger.debug(f"Total label characters placed in map: {label_count}")
 
-        logging.debug(f"Processed features: {ways_count['highway']} highways, "
+        radar_logger.debug(f"Processed features: {ways_count['highway']} highways, "
                      f"{ways_count['water']} water bodies, "
                      f"{ways_count['waterway']} waterways, "
                      f"{places_count} places")
@@ -556,7 +614,7 @@ class RadarDisplay(urwid.Widget):
             
             if start_x < width and end_x > 0:
                 text_portion = text[max(0, -start_x):min(len(text), width-start_x)]
-                logging.debug(f"Drawing text '{text_portion}' at ({start_x}, {y})")
+                radar_logger.debug(f"Drawing text '{text_portion}' at ({start_x}, {y})")
                 
                 # Draw a background space before and after text
                 for i in range(max(0, start_x - 1), min(width, end_x + 1)):
@@ -684,17 +742,30 @@ class RadarDisplay(urwid.Widget):
         try:
             if tile_bounds:
                 lat1, lon1, lat2, lon2 = tile_bounds
+                # Project relative to center within the tile bounds
                 x = int(width/2 + ((lon - center_lon) / (lon2 - lon1)) * width)
                 y = int(height/2 + ((center_lat - lat) / (lat1 - lat2)) * height)
+                
+                # Scale based on zoom level
+                if self.zoom != 11:  # Only adjust if not at base zoom
+                    zoom_factor = 2 ** (11 - self.zoom)  # >1 for zoomed out, <1 for zoomed in
+                    dx = x - width//2
+                    dy = y - height//2
+                    x = width//2 + int(dx / zoom_factor)
+                    y = height//2 + int(dy / zoom_factor)
             else:
-                DEGREES_PER_TILE = 0.1
+                # Adjust scale based on zoom level
+                base_degrees = 0.1  # Base scale at zoom level 11
+                zoom_diff = 11 - self.zoom  # Difference from base zoom
+                DEGREES_PER_TILE = base_degrees * (2 ** zoom_diff)
+                
                 scale = width / DEGREES_PER_TILE
                 x = width//2 + int((lon - center_lon) * scale)
                 y = height//2 - int((lat - center_lat) * scale)
             
-            return (x, y)  # Remove clamping here
+            return (x, y)
         except Exception as e:
-            logging.error(f"Projection error: {str(e)}")
+            radar_logger.error(f"Projection error: {str(e)}")
             return None
 
     def render(self, size, focus=False):
@@ -702,7 +773,7 @@ class RadarDisplay(urwid.Widget):
         result = []
         
         if self.radar_data is None or self.road_map is None:
-            logging.debug("No radar or road map data available")
+            radar_logger.debug("No radar or road map data available")
             empty_line = " " * maxcol
             for i in range(maxrow):
                 result.append(([(None, maxcol)], empty_line.encode('utf-8')))
@@ -734,13 +805,13 @@ class RadarDisplay(urwid.Widget):
                     
                     # Apply radar data if present
                     val = radar_data[y, x]
-                    if val > 0.01:
+                    if val > 0.01:  # Keep minimum threshold to show any precipitation
                         display_style[y, x] = 'radar_' + (
-                            'very_light' if val <= 0.05 else
-                            'light' if val <= 0.1 else
-                            'moderate' if val <= 0.2 else
-                            'heavy' if val <= 0.4 else
-                            'extreme'
+                            'very_light' if val <= 0.08 else    # Very light rain/drizzle (0.01-0.08)
+                            'light' if val <= 0.15 else         # Light rain (0.08-0.15)
+                            'moderate' if val <= 0.3 else       # Moderate rain (0.15-0.3)
+                            'heavy' if val <= 0.6 else          # Heavy rain (0.3-0.6)
+                            'extreme'                           # Extreme precipitation (>0.6)
                         )
             
             # Second pass: Draw roads on top of radar
@@ -799,8 +870,8 @@ class RadarDisplay(urwid.Widget):
             # Use alpha channel (precipitation intensity) and normalize
             self.radar_data = radar_data[:, :, 3] / 255.0  # Changed from full array to alpha channel
             
-            logging.debug(f"Radar data shape: {self.radar_data.shape}")
-            logging.debug(f"Radar data range: {self.radar_data.min():.3f} to {self.radar_data.max():.3f}")
+            radar_logger.debug(f"Radar data shape: {self.radar_data.shape}")
+            radar_logger.debug(f"Radar data range: {self.radar_data.min():.3f} to {self.radar_data.max():.3f}")
             
             # Store location name
             self.location_name = location_name
@@ -836,12 +907,12 @@ class RadarDisplay(urwid.Widget):
             
             self._invalidate()
         except Exception as e:
-            logging.error(f"Error updating radar: {str(e)}", exc_info=True)
+            radar_logger.error(f"Error updating radar: {str(e)}", exc_info=True)
 
     def _point_in_polygon(self, x: int, y: int, polygon: List[tuple]) -> bool:
         """Ray casting algorithm to determine if a point is inside a polygon"""
         if len(polygon) < 3:
-            logging.debug(f"Polygon has fewer than 3 points: {len(polygon)}")
+            radar_logger.debug(f"Polygon has fewer than 3 points: {len(polygon)}")
             return False
         
         inside = False
@@ -855,7 +926,7 @@ class RadarDisplay(urwid.Widget):
                     inside = not inside
                 j = i
         except Exception as e:
-            logging.error(f"Point-in-polygon error at ({x}, {y}): {str(e)}")
+            radar_logger.error(f"Point-in-polygon error at ({x}, {y}): {str(e)}")
             return False
         
         return inside
