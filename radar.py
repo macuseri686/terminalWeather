@@ -74,7 +74,7 @@ class RadarDisplay(urwid.Widget):
         if radius is None:
             base_radius = 5000
             zoom_diff = 11 - self.zoom
-            radius = base_radius * (2 ** zoom_diff)
+            radius = base_radius * (3 ** zoom_diff)
             radar_logger.debug(f"Using radius {radius}m for zoom level {self.zoom}")
         
         # Adjust road types based on zoom level
@@ -740,26 +740,35 @@ class RadarDisplay(urwid.Widget):
                        degrees_per_pixel_lon=None, tile_bounds=None) -> tuple:
         """Project geographic coordinates to pixel coordinates relative to center."""
         try:
+            # Base scale at zoom level 11
+            base_degrees = 0.1
+            zoom_diff = 11 - self.zoom
+            degrees_per_tile = base_degrees * (2 ** zoom_diff)
+            
             if tile_bounds:
                 lat1, lon1, lat2, lon2 = tile_bounds
-                # Project relative to center within the tile bounds
-                x = int(width/2 + ((lon - center_lon) / (lon2 - lon1)) * width)
-                y = int(height/2 + ((center_lat - lat) / (lat1 - lat2)) * height)
+                # Calculate the tile width in degrees
+                tile_width_degrees = lon2 - lon1
+                tile_height_degrees = lat1 - lat2
                 
-                # Scale based on zoom level
-                if self.zoom != 11:  # Only adjust if not at base zoom
-                    zoom_factor = 2 ** (11 - self.zoom)  # >1 for zoomed out, <1 for zoomed in
-                    dx = x - width//2
-                    dy = y - height//2
-                    x = width//2 + int(dx / zoom_factor)
-                    y = height//2 + int(dy / zoom_factor)
+                # More aggressive scaling factor for zoomed out views
+                zoom_scale = 2 ** (max(0, zoom_diff))  # Exponential scaling
+                
+                # Calculate relative position from center
+                rel_lon = (lon - center_lon) / tile_width_degrees
+                rel_lat = (center_lat - lat) / tile_height_degrees
+                
+                # Apply zoom scaling to spread points further from center
+                rel_lon *= zoom_scale
+                rel_lat *= zoom_scale
+                
+                # Convert to screen coordinates
+                x = int(width/2 + rel_lon * width)
+                y = int(height/2 + rel_lat * height)
             else:
-                # Adjust scale based on zoom level
-                base_degrees = 0.1  # Base scale at zoom level 11
-                zoom_diff = 11 - self.zoom  # Difference from base zoom
-                DEGREES_PER_TILE = base_degrees * (2 ** zoom_diff)
-                
-                scale = width / DEGREES_PER_TILE
+                # Direct projection using degrees_per_tile with aggressive scaling
+                zoom_scale = 2 ** (max(0, zoom_diff))
+                scale = (width / degrees_per_tile) / zoom_scale
                 x = width//2 + int((lon - center_lon) * scale)
                 y = height//2 - int((lat - center_lat) * scale)
             
@@ -857,21 +866,78 @@ class RadarDisplay(urwid.Widget):
         )
 
     def update_radar(self, radar_image_data, overpass_data, location_name=None, 
-                    center_lat=None, center_lon=None, tile_bounds=None):
+                    center_lat=None, center_lon=None, tile_bounds=None, 
+                    pixel_offset=(0, 0)):
         """Update radar display with new image data and map features"""
         try:
             # Process radar data
             radar_image = Image.open(io.BytesIO(radar_image_data))
-            if radar_image.mode != 'RGBA':  # Change from 'L' to 'RGBA'
+            if radar_image.mode != 'RGBA':
                 radar_image = radar_image.convert('RGBA')
             
-            # Extract alpha channel which contains precipitation data
-            radar_data = np.array(radar_image)
-            # Use alpha channel (precipitation intensity) and normalize
-            self.radar_data = radar_data[:, :, 3] / 255.0  # Changed from full array to alpha channel
+            # Ensure pixel offsets are within bounds
+            offset_x = max(0, min(pixel_offset[0], radar_image.width - self.width))
+            offset_y = max(0, min(pixel_offset[1], radar_image.height - self.height))
             
-            radar_logger.debug(f"Radar data shape: {self.radar_data.shape}")
-            radar_logger.debug(f"Radar data range: {self.radar_data.min():.3f} to {self.radar_data.max():.3f}")
+            # Crop the image based on adjusted pixel offset and display size
+            crop_box = (
+                offset_x,
+                offset_y,
+                min(offset_x + self.width, radar_image.width),
+                min(offset_y + self.height, radar_image.height)
+            )
+            
+            radar_logger.debug(f"Cropping radar image from {radar_image.size} to {crop_box}")
+            radar_image = radar_image.crop(crop_box)
+            
+            # Extract precipitation data
+            radar_data = np.array(radar_image)
+            radar_logger.debug(f"Raw radar data shape: {radar_data.shape}")
+            radar_logger.debug(f"Raw value ranges: R:{radar_data[:,:,0].min()}-{radar_data[:,:,0].max()}, "
+                              f"G:{radar_data[:,:,1].min()}-{radar_data[:,:,1].max()}, "
+                              f"B:{radar_data[:,:,2].min()}-{radar_data[:,:,2].max()}, "
+                              f"A:{radar_data[:,:,3].min()}-{radar_data[:,:,3].max()}")
+            
+            # Use blue channel for precipitation intensity and alpha for masking
+            blue_channel = radar_data[:, :, 2]  # Blue channel
+            alpha_mask = radar_data[:, :, 3] > 10  # Ignore nearly transparent pixels
+            
+            # Normalize blue values to 0-1 range
+            precipitation = np.zeros_like(blue_channel, dtype=float)
+            precipitation[alpha_mask] = blue_channel[alpha_mask] / 255.0
+            
+            radar_logger.debug(f"Precipitation value range: {precipitation.min():.3f} to {precipitation.max():.3f}")
+            radar_logger.debug(f"Number of precipitation pixels: {np.sum(alpha_mask)}")
+            
+            # Map the blue intensities to our color scheme
+            # Our raw blue values are typically between 205-223
+            # Let's spread out the green ranges and compress yellow/red
+            self.radar_data = np.zeros_like(precipitation)
+            # Map their ranges to our intensity levels
+            self.radar_data[precipitation > 0.81] = 0.08   # Very light (light green) - starts at blue 204
+            self.radar_data[precipitation > 0.83] = 0.15  # Light (dark green) - starts at blue 212
+            self.radar_data[precipitation > 0.86] = 0.3   # Moderate (yellow) - starts at blue 219
+            self.radar_data[precipitation > 0.88] = 0.6   # Heavy (red) - starts at blue 222
+            self.radar_data[precipitation > 0.9] = 1.0   # Extreme (dark red) - starts at blue 224
+            
+            # Log threshold counts
+            for threshold, label in [
+                (0.8, "very light"),
+                (0.83, "light"),
+                (0.86, "moderate"),
+                (0.87, "heavy"),
+                (0.88, "extreme")
+            ]:
+                count = np.sum(precipitation > threshold)
+                radar_logger.debug(f"Pixels above {threshold} ({label}): {count}")
+            
+            radar_logger.debug(f"Final radar data shape: {self.radar_data.shape}")
+            radar_logger.debug(f"Final radar data range: {self.radar_data.min():.3f} to {self.radar_data.max():.3f}")
+            
+            if tile_bounds:
+                lat1, lon1, lat2, lon2 = tile_bounds
+                radar_logger.debug(f"Tile bounds: {lat1:.6f}N to {lat2:.6f}N, {lon1:.6f}W to {lon2:.6f}W")
+                radar_logger.debug(f"Center point: {center_lat:.6f}, {center_lon:.6f}")
             
             # Store location name
             self.location_name = location_name

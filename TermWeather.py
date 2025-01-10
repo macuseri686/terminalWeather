@@ -498,8 +498,8 @@ class WeatherApp:
         zoom_overlay = urwid.Overlay(
             zoom_controls,
             self.radar,
-            'left', 4,  # width of 4 characters
-            'top', 4    # height of 4 rows
+            'left', 5,  # width of 5 characters
+            'top', 2    # height of 2 rows
         )
         
         # Create a fixed-size box for the radar with zoom controls
@@ -562,64 +562,117 @@ class WeatherApp:
             lat_rad = math.radians(lat)
             n = 2.0 ** zoom
             
-            # Convert coordinates to tile numbers
+            # Calculate center tile
             xtile = int((lon + 180.0) / 360.0 * n)
             ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
             
-            # Calculate how many tiles we need based on zoom level
-            # At lower zoom levels, we need more tiles to cover the same area
-            tiles_needed = max(1, int(2 ** (11 - zoom)))  # Base coverage at zoom 11
+            # Calculate viewport size in tiles based on display dimensions
+            display_width = self.radar.width
+            display_height = self.radar.height
             
-            # Calculate tile range
-            x_start = max(0, xtile - tiles_needed//2)
-            x_end = min(int(n), xtile + tiles_needed//2 + 1)
-            y_start = max(0, ytile - tiles_needed//2)
-            y_end = min(int(n), ytile + tiles_needed//2 + 1)
+            # Calculate tiles needed based on display size and zoom level
+            pixels_per_tile = 256
+            scale_factor = 1.5  # Add some overlap to prevent gaps
+            tiles_x = math.ceil((display_width * scale_factor) / pixels_per_tile)
+            tiles_y = math.ceil((display_height * scale_factor) / pixels_per_tile)
             
-            # Calculate bounds for the entire area
+            # Ensure we fetch an odd number of tiles to center properly
+            tiles_x = tiles_x + (1 - tiles_x % 2)  # Make odd
+            tiles_y = tiles_y + (1 - tiles_y % 2)  # Make odd
+            
+            # Calculate tile range ensuring center tile is centered
+            x_start = xtile - tiles_x // 2
+            x_end = x_start + tiles_x
+            y_start = ytile - tiles_y // 2
+            y_end = y_start + tiles_y
+            
+            # Ensure tile coordinates are valid
+            x_start = max(0, x_start)
+            x_end = min(int(n), x_end)
+            y_start = max(0, y_start)
+            y_end = min(int(n), y_end)
+            
+            # Calculate pixel offset to center the view
+            pixel_offset_x = (xtile - x_start) * pixels_per_tile - (display_width // 2)
+            pixel_offset_y = (ytile - y_start) * pixels_per_tile - (display_height // 2)
+            
+            # Functions to convert tile coordinates to lat/lon
             def lat_from_y(y, n_tiles):
-                n = math.pi - 2.0 * math.pi * y / n_tiles
-                return math.degrees(math.atan(math.sinh(n)))
+                n_val = math.pi - 2.0 * math.pi * y / n_tiles
+                return math.degrees(math.atan(math.sinh(n_val)))
             
             def lon_from_x(x, n_tiles):
                 return x * 360.0 / n_tiles - 180.0
             
-            # Get bounds for entire area
+            # Calculate bounds for entire area
             lat1 = lat_from_y(y_start, n)      # North latitude
             lat2 = lat_from_y(y_end, n)        # South latitude
             lon1 = lon_from_x(x_start, n)      # West longitude
             lon2 = lon_from_x(x_end, n)        # East longitude
             
-            app_logger.debug(f"Fetching tiles: x={x_start}-{x_end}, y={y_start}-{y_end}")
-            
-            # Create a combined radar image
-            combined_width = (x_end - x_start) * 256  # OpenWeatherMap tiles are 256x256
-            combined_height = (y_end - y_start) * 256
+            # Create combined radar image with extra space for alignment
+            combined_width = (x_end - x_start) * pixels_per_tile
+            combined_height = (y_end - y_start) * pixels_per_tile
             combined_radar = Image.new('RGBA', (combined_width, combined_height))
+            
+            # Track which tiles were successfully fetched
+            fetched_tiles = []
             
             # Fetch and combine radar tiles
             for y in range(y_start, y_end):
                 for x in range(x_start, x_end):
                     try:
+                        # Build and log the complete URL
+                        url = f"/map/precipitation_new/{zoom}/{x}/{y}.png?appid={self.api_key}"
+                        base_url = "https://tile.openweathermap.org"
+                        full_url = base_url + url
+                        app_logger.debug(f"Fetching radar tile from: {full_url}")
+                        
+                        # Use the correct URL format from the documentation
                         radar_data = download_binary(
-                            f"/map/precipitation_new/{zoom}/{x}/{y}.png",
-                            base_url="https://tile.openweathermap.org"
+                            url,
+                            base_url=base_url
                         )
                         if radar_data:
                             tile_img = Image.open(io.BytesIO(radar_data))
-                            combined_radar.paste(tile_img, 
-                                              ((x - x_start) * 256, 
-                                               (y - y_start) * 256))
+                            # Ensure the tile is in RGBA mode
+                            if tile_img.mode != 'RGBA':
+                                tile_img = tile_img.convert('RGBA')
+                            
+                            # Calculate tile position
+                            tile_x = (x - x_start) * pixels_per_tile
+                            tile_y = (y - y_start) * pixels_per_tile
+                            combined_radar.paste(tile_img, (tile_x, tile_y))
+                            
+                            # Track successful tile
+                            fetched_tiles.append((x, y))
+                            
+                            # Debug tile info
+                            tile_lat1 = lat_from_y(y, n)
+                            tile_lat2 = lat_from_y(y + 1, n)
+                            tile_lon1 = lon_from_x(x, n)
+                            tile_lon2 = lon_from_x(x + 1, n)
+                            app_logger.debug(f"Tile {x},{y} placed at {tile_x},{tile_y}:")
+                            app_logger.debug(f"  Covers: {tile_lat1:.6f}N to {tile_lat2:.6f}N, "
+                                          f"{tile_lon1:.6f}W to {tile_lon2:.6f}W")
+                            
                     except Exception as e:
                         app_logger.error(f"Error fetching radar tile {x},{y}: {str(e)}")
             
+            app_logger.debug(f"Successfully fetched {len(fetched_tiles)} of "
+                            f"{(x_end-x_start)*(y_end-y_start)} tiles")
+            
             # Get map features from Overpass API
+            app_logger.debug("Fetching Overpass data...")
             overpass_data = self.radar._fetch_overpass_data(lat, lon)
             
             # Update radar display with combined radar data
             combined_radar_bytes = io.BytesIO()
             combined_radar.save(combined_radar_bytes, format='PNG')
             combined_radar_bytes = combined_radar_bytes.getvalue()
+            
+            # Debug final image size
+            app_logger.debug(f"Final combined radar image size: {combined_width}x{combined_height}")
             
             # Update radar display
             self.radar.update_radar(
@@ -628,7 +681,8 @@ class WeatherApp:
                 location_name=self.geo_handler.get_current_location(),
                 center_lat=lat,
                 center_lon=lon,
-                tile_bounds=(lat1, lon1, lat2, lon2)
+                tile_bounds=(lat1, lon1, lat2, lon2),
+                pixel_offset=(pixel_offset_x, pixel_offset_y)
             )
             
         except Exception as e:
