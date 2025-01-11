@@ -72,9 +72,9 @@ class RadarDisplay(urwid.Widget):
         """Fetch map data from Overpass API with caching"""
         # Calculate radius based on zoom level
         if radius is None:
-            base_radius = 5000
+            base_radius = 3500  # Reduced from 5000m to 2000m
             zoom_diff = 11 - self.zoom
-            radius = base_radius * (3 ** zoom_diff)
+            radius = base_radius * (4 ** zoom_diff)
             radar_logger.debug(f"Using radius {radius}m for zoom level {self.zoom}")
         
         # Adjust road types based on zoom level
@@ -159,8 +159,13 @@ class RadarDisplay(urwid.Widget):
             """
             
             radar_logger.debug(f"Fetching Overpass data for: {lat}, {lon}, radius: {radius}m")
-            url = "https://overpass-api.de/api/interpreter"
+            url = "https://overpass.kumi.systems/api/interpreter"  # US-based Overpass instance
             headers = {'User-Agent': 'TerminalWeather/1.0'}
+            
+            # Log the complete URL and query
+            radar_logger.debug(f"Overpass URL: {url}")
+            radar_logger.debug(f"Overpass query:\n{query}")
+            
             response = requests.post(url, data={'data': query}, headers=headers, timeout=25)
             response.raise_for_status()
             data = response.json()
