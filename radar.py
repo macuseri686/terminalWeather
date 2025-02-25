@@ -188,6 +188,17 @@ class RadarDisplay(urwid.Widget):
             return data
         except Exception as e:
             radar_logger.error(f"Failed to fetch Overpass data: {str(e)}")
+            
+            # Try to fallback to cached data even if it's stale
+            if os.path.exists(cache_path):
+                try:
+                    with open(cache_path, 'r') as f:
+                        data = json.load(f)
+                    radar_logger.debug(f"Falling back to stale cached data from {cache_path}")
+                    return data
+                except Exception as cache_e:
+                    radar_logger.error(f"Failed to read stale cache: {str(cache_e)}")
+            
             return None
 
     def _process_overpass_features(self, data: Dict, width: int, height: int, 
